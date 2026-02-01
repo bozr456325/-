@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8528977779:AAHbPeWIA8rNuDyHc_eI7F7c2qr3M8Xw3_o")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6928639672").split(",") if x.strip()]
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://jetstoreapp.ru")
-ADM_WEB_APP_URL = os.getenv("ADM_WEB_APP_URL", "https://jetstoreapp.ru/admin.html")
+ADM_WEB_APP_URL = os.getenv("ADM_WEB_APP_URL", "https://jetstoreapp.ru/html/admin.html")
 
 # Группа/чат, куда слать уведомления о продаже звёзд
 SELL_STARS_NOTIFY_CHAT_ID = int(os.getenv("SELL_STARS_NOTIFY_CHAT_ID", "0") or "0")
@@ -1491,6 +1491,25 @@ def setup_http_server():
 
     app.router.add_get('/api/config', api_config_handler)
 
+    async def ton_rate_handler(request):
+        """Курс TON→RUB через CoinPaprika (прокси для обхода CORS в Telegram WebView)."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api.coinpaprika.com/v1/tickers/ton-toncoin?quotes=RUB") as resp:
+                    data = await resp.json(content_type=None) if resp.content_type else {}
+            rub_price = None
+            if data and data.get("quotes") and data["quotes"].get("RUB"):
+                rub_price = float(data["quotes"]["RUB"].get("price", 0) or 0)
+            if not rub_price or rub_price <= 0:
+                return _json_response({"TON": 600, "RUB_TON": 1 / 600})
+            rub_ton = 1 / rub_price
+            return _json_response({"TON": round(rub_price, 2), "RUB_TON": round(rub_ton, 8)})
+        except Exception as e:
+            logger.warning(f"TON rate fetch error: {e}")
+            return _json_response({"TON": 600, "RUB_TON": 1 / 600})
+
+    app.router.add_get('/api/ton-rate', ton_rate_handler)
+
     async def telethon_status_handler(request):
         try:
             payload = {
@@ -1608,15 +1627,12 @@ def setup_http_server():
     app.router.add_post("/api/donatehub/steam/topup", donatehub_steam_topup_handler)
     app.router.add_get("/api/donatehub/order/{id}", donatehub_order_status_handler)
     
-    # Crypto Pay (CryptoBot) — загружаем до payment_check
+    # Crypto Pay (CryptoBot)
     _cryptobot_cfg_early = _read_json_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "cryptobot_config.json"))
     CRYPTO_PAY_TOKEN = _get_env_clean("CRYPTO_PAY_TOKEN") or _cryptobot_cfg_early.get("api_token", "")
     CRYPTO_PAY_BASE = "https://pay.crypt.bot/api"
 
     # Проверка оплаты (Fragment.com / TonKeeper / CryptoBot).
-    # Фронт шлёт: method, totalAmount, baseAmount, purchase, order_id (если заказ создан через Fragment).
-    # При успешной оплате Fragment шлёт вебхук order.completed — мы сохраняем order_id в app["fragment_completed_orders"].
-    # ДЛЯ ПРОВЕРКИ: звёзды и премиум считаются оплаченными без реальной проверки — сразу возвращаем paid: True.
     async def payment_check_handler(request):
         try:
             body = await request.json()
@@ -1624,7 +1640,6 @@ def setup_http_server():
             body = {}
         purchase = body.get("purchase") or {}
         purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
-        # звёзды/премиум по полям: type, stars_amount, months
         is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
         is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
         order_id = (body.get("order_id") or body.get("orderId") or "").strip()
@@ -1653,11 +1668,10 @@ def setup_http_server():
                 logger.warning(f"Crypto Pay check invoice {invoice_id}: {e}")
         if invoice_id and method == "cryptobot":
             return _json_response({"paid": False})
-        # ДЛЯ ПРОВЕРКИ: без подтверждения оплаты — звёзды/премиум (не cryptobot) сразу считаем оплаченными
         if is_stars or is_premium:
             return _json_response({"paid": True})
         if transaction_id:
-            pass  # при необходимости проверка по transaction_id (другая платёжка)
+            pass
         return _json_response({"paid": False})
     
     app.router.add_post("/api/payment/check", payment_check_handler)
@@ -1817,9 +1831,6 @@ def setup_http_server():
                         }, status=400)
                     recipient_hash = val_data.get("recipient")
                 payload = {"username": recipient, "recipient_hash": recipient_hash, "quantity": stars_amount, "wallet_type": "TON"}
-                wallet_address = (body.get("wallet_address") or "").strip()
-                if wallet_address and wallet_address != "test_user_default":
-                    payload["wallet_address"] = wallet_address
                 async with session.post(f"{FRAGMENT_BASE}/orders/star", headers=headers, json=payload) as resp:
                     data = await resp.json(content_type=None) if resp.content_type else {}
                     if resp.status >= 400:
@@ -1871,9 +1882,6 @@ def setup_http_server():
                         }, status=400)
                     recipient_hash = val_data.get("recipient")
                 payload = {"username": recipient, "recipient_hash": recipient_hash, "months": months, "wallet_type": "TON"}
-                wallet_address = (body.get("wallet_address") or "").strip()
-                if wallet_address and wallet_address != "test_user_default":
-                    payload["wallet_address"] = wallet_address
                 async with session.post(f"{FRAGMENT_BASE}/orders/premium", headers=headers, json=payload) as resp:
                     data = await resp.json(content_type=None) if resp.content_type else {}
                     if resp.status >= 400:
@@ -1917,11 +1925,39 @@ def setup_http_server():
     app.router.add_post("/api/fragment/webhook", fragment_webhook_handler)
     app.router.add_route("OPTIONS", "/api/fragment/webhook", lambda r: Response(status=204, headers=_cors_headers()))
 
-    # ============ Crypto Pay API (CryptoBot) ============
+    # Health check
+    async def api_health_handler(request):
+        return _json_response({"ok": True, "service": "jet-store-bot", "message": "Бот работает"})
+    app.router.add_get('/api/health', api_health_handler)
+
+    # CryptoBot status + проверка токена через getMe
+    async def cryptobot_status_handler(request):
+        has_token = bool(CRYPTO_PAY_TOKEN)
+        token_source = "env" if _get_env_clean("CRYPTO_PAY_TOKEN") else ("file" if _cryptobot_cfg_early.get("api_token") else "none")
+        result = {
+            "configured": has_token,
+            "token_source": token_source,
+            "token_preview": (CRYPTO_PAY_TOKEN[:10] + "...") if has_token else None
+        }
+        if has_token:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{CRYPTO_PAY_BASE}/getMe",
+                        headers={"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}) as resp:
+                        me_data = await resp.json(content_type=None) if resp.content_type else {}
+                        result["api_ok"] = me_data.get("ok", False)
+                        if not me_data.get("ok"):
+                            result["api_error"] = me_data.get("error", "unknown")
+            except Exception as e:
+                result["api_ok"] = False
+                result["api_error"] = str(e)
+        return _json_response(result)
+    app.router.add_get("/api/cryptobot/status", cryptobot_status_handler)
+
+    # CryptoBot create invoice
     async def cryptobot_create_invoice_handler(request):
-        """Создать инвойс Crypto Pay: amount (RUB), description, payload. Возвращает payment_url и invoice_id."""
         if not CRYPTO_PAY_TOKEN:
-            return _json_response({"error": "not_configured", "message": "Crypto Pay API token not set (cryptobot_config.json)"}, status=503)
+            return _json_response({"error": "not_configured", "message": "CRYPTO_PAY_TOKEN не задан. Добавьте в переменные окружения Railway/Render."}, status=503)
         try:
             body = await request.json()
         except Exception:
@@ -1941,42 +1977,63 @@ def setup_http_server():
             payload_data = json.dumps(payload_data, ensure_ascii=False)[:4096]
         else:
             payload_data = str(payload_data)[:4096]
+
+        # По документации Crypto Pay API: https://help.send.tg/en/articles/10279948-crypto-pay-api
         payload_obj = {
             "currency_type": "fiat",
             "fiat": "RUB",
-            "amount": f"{amount:.2f}",
+            "amount": f"{amount:.2f}",  # Строка в формате float, напр. "125.50"
             "description": description,
             "accepted_assets": "USDT,TON,BTC,ETH,TRX,USDC",
             "payload": payload_data,
             "paid_btn_name": "callback",
             "paid_btn_url": WEB_APP_URL or "https://jetstoreapp.ru",
         }
-        headers = {"Content-Type": "application/json", "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
+        headers = {
+            "Content-Type": "application/json",
+            "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN,
+        }
+        logger.info(f"CryptoBot createInvoice: amount={amount}, fiat=RUB")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(f"{CRYPTO_PAY_BASE}/createInvoice", headers=headers, json=payload_obj) as resp:
-                    data = await resp.json(content_type=None) if resp.content_type else {}
-                    if not data.get("ok") or not data.get("result"):
-                        err = data.get("error", {})
+                    resp_text = await resp.text()
+                    logger.info(f"CryptoBot response status={resp.status}, body={resp_text[:300]}")
+                    try:
+                        data = json.loads(resp_text) if resp_text else {}
+                    except json.JSONDecodeError:
                         return _json_response({
                             "error": "cryptobot_error",
-                            "message": err.get("name", err.get("message", "Crypto Pay API error"))
+                            "message": f"Неверный ответ API: {resp_text[:150]}"
                         }, status=502)
-                    inv = data["result"]
-                    pay_url = inv.get("mini_app_invoice_url") or inv.get("bot_invoice_url") or inv.get("pay_url") or ""
+                    if not data.get("ok"):
+                        err = data.get("error")
+                        if isinstance(err, dict):
+                            err_msg = err.get("name") or err.get("message") or str(err)
+                        else:
+                            err_msg = str(err) if err else "Unknown error"
+                        logger.error(f"CryptoBot API error: {err_msg}, full={data}")
+                        return _json_response({
+                            "error": "cryptobot_error",
+                            "message": err_msg,
+                            "details": data.get("error")
+                        }, status=502)
+                    inv = data.get("result", {})
+                    # mini_app_invoice_url — для Telegram Mini App, bot_invoice_url — fallback
+                    pay_url = (inv.get("mini_app_invoice_url") or inv.get("web_app_invoice_url")
+                               or inv.get("bot_invoice_url") or inv.get("pay_url") or "")
                     return _json_response({
-                        "success": True,
-                        "invoice_id": inv.get("invoice_id"),
-                        "payment_url": pay_url,
-                        "pay_url": pay_url,
-                        "hash": inv.get("hash"),
+                        "success": True, "invoice_id": inv.get("invoice_id"),
+                        "payment_url": pay_url, "pay_url": pay_url, "hash": inv.get("hash"),
                     })
+        except aiohttp.ClientError as e:
+            logger.error(f"CryptoBot network error: {e}")
+            return _json_response({"error": "network_error", "message": f"Ошибка связи с Crypto Pay: {e}"}, status=502)
         except Exception as e:
-            logger.error(f"Crypto Pay createInvoice error: {e}")
+            logger.error(f"CryptoBot createInvoice error: {e}")
             return _json_response({"error": "internal_error", "message": str(e)}, status=500)
 
     async def cryptobot_check_invoice_handler(request):
-        """Проверить статус инвойса Crypto Pay по invoice_id"""
         if not CRYPTO_PAY_TOKEN:
             return _json_response({"error": "not_configured"}, status=503)
         try:
@@ -1989,21 +2046,13 @@ def setup_http_server():
         headers = {"Content-Type": "application/json", "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{CRYPTO_PAY_BASE}/getInvoices",
-                    headers=headers,
-                    params={"invoice_ids": str(invoice_id), "status": "paid"}
-                ) as resp:
+                async with session.get(f"{CRYPTO_PAY_BASE}/getInvoices", headers=headers,
+                    params={"invoice_ids": str(invoice_id), "status": "paid"}) as resp:
                     data = await resp.json(content_type=None) if resp.content_type else {}
                     if not data.get("ok"):
                         return _json_response({"paid": False})
-                    items = data.get("result")
-                    if not isinstance(items, list):
-                        items = []
-                    paid = any(
-                        str(inv.get("invoice_id")) == str(invoice_id) and inv.get("status") == "paid"
-                        for inv in items
-                    )
+                    items = data.get("result") or []
+                    paid = any(str(inv.get("invoice_id")) == str(invoice_id) and inv.get("status") == "paid" for inv in items) if isinstance(items, list) else False
                     return _json_response({"paid": paid, "invoice_id": invoice_id})
         except Exception as e:
             logger.error(f"Crypto Pay getInvoices error: {e}")
@@ -2061,8 +2110,8 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 HTTP API сервер запущен на порту {port}")
-    print("   Эндпоинт: http://localhost:3000/api/telegram/user?username=<username>")
-    print("   Для деплоя на Railway/Render: git push → получите публичный URL бота")
+    print("   Эндпоинт: /api/telegram/user, /api/cryptobot/create-invoice")
+    print("   Для Railway: git push → получите публичный URL бота")
     print("=" * 50)
     
     try:
