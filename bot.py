@@ -1509,6 +1509,7 @@ def setup_http_server():
             return _json_response({"TON": 600, "RUB_TON": 1 / 600})
 
     app.router.add_get('/api/ton-rate', ton_rate_handler)
+    app.router.add_route('OPTIONS', '/api/ton-rate', lambda r: Response(status=204, headers=_cors_headers()))
 
     async def telethon_status_handler(request):
         try:
