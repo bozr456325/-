@@ -2020,12 +2020,17 @@ def setup_http_server():
                             "details": data.get("error")
                         }, status=502)
                     inv = data.get("result", {})
-                    # mini_app_invoice_url — для Telegram Mini App, bot_invoice_url — fallback
                     pay_url = (inv.get("mini_app_invoice_url") or inv.get("web_app_invoice_url")
                                or inv.get("bot_invoice_url") or inv.get("pay_url") or "")
+                    if not pay_url and isinstance(inv, dict):
+                        for k in ("mini_app_invoice_url", "web_app_invoice_url", "bot_invoice_url", "pay_url"):
+                            if inv.get(k):
+                                pay_url = inv[k]
+                                break
+                    logger.info(f"CryptoBot invoice created: invoice_id={inv.get('invoice_id')}, pay_url_len={len(pay_url) if pay_url else 0}")
                     return _json_response({
                         "success": True, "invoice_id": inv.get("invoice_id"),
-                        "payment_url": pay_url, "pay_url": pay_url, "hash": inv.get("hash"),
+                        "payment_url": pay_url or None, "pay_url": pay_url or None, "hash": inv.get("hash"),
                     })
         except aiohttp.ClientError as e:
             logger.error(f"CryptoBot network error: {e}")
