@@ -1669,11 +1669,8 @@ def setup_http_server():
     CRYPTO_PAY_TOKEN = _get_env_clean("CRYPTO_PAY_TOKEN") or _cryptobot_cfg_early.get("api_token", "")
     CRYPTO_PAY_BASE = "https://pay.crypt.bot/api"
 
-    # Fragment.com (сайт) — вызов fragment.com/api через cookies + hash (как в fragment.py).
+    # Fragment.com (сайт) — вызов fragment.com/api через cookies + hash (как в ezstar).
     _fragment_site_cfg = _read_json_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fragment_site_config.json"))
-    # Aliases for convenience:
-    # - FRAGMENT_COOKIES: same as FRAGMENT_SITE_COOKIES (full "Cookie:" header value)
-    # - FRAGMENT_HASH: same as FRAGMENT_SITE_HASH (value of ?hash=... used by fragment.com/api)
     FRAGMENT_SITE_COOKIES = (
         _get_env_clean("FRAGMENT_SITE_COOKIES")
         or _get_env_clean("FRAGMENT_COOKIES")
@@ -1685,6 +1682,16 @@ def setup_http_server():
         or str(_fragment_site_cfg.get("hash", "") or "").strip()
     )
     FRAGMENT_SITE_ENABLED = bool(FRAGMENT_SITE_COOKIES and FRAGMENT_SITE_HASH)
+    # TON-кошелёк бота для отправки TON в Fragment (как в ezstar: бот сам платит Fragment, звёзды приходят получателю).
+    TONAPI_KEY = _get_env_clean("TONAPI_KEY") or str(_fragment_site_cfg.get("tonapi_key", "") or "").strip()
+    _mnemonic_raw = _get_env_clean("MNEMONIC") or _fragment_site_cfg.get("mnemonic")
+    if isinstance(_mnemonic_raw, str):
+        MNEMONIC = [s.strip() for s in _mnemonic_raw.replace(",", " ").split() if s.strip()] if _mnemonic_raw else []
+    elif isinstance(_mnemonic_raw, list):
+        MNEMONIC = [str(x).strip() for x in _mnemonic_raw if str(x).strip()]
+    else:
+        MNEMONIC = []
+    TON_WALLET_ENABLED = bool(TONAPI_KEY and len(MNEMONIC) >= 24)
 
     def _fragment_site_headers(*, referer: str) -> dict:
         return {
@@ -1714,6 +1721,21 @@ def setup_http_server():
                     raise RuntimeError(f"fragment.com/api error {resp.status}: {data}")
                 return data if isinstance(data, dict) else {"data": data}
 
+    def _fragment_encoded(encoded_string: str) -> str:
+        """Декодирование payload из Fragment (как ezstar api/fragment.encoded)."""
+        s = (encoded_string or "").strip()
+        missing = len(s) % 4
+        if missing:
+            s += "=" * (4 - missing)
+        try:
+            decoded = base64.b64decode(s).decode("utf-8", errors="ignore")
+            for i, c in enumerate(decoded):
+                if c.isdigit():
+                    return decoded[i:]
+            return decoded
+        except Exception:
+            return encoded_string
+
     def _extract_any_url(obj) -> Optional[str]:
         # Пытаемся найти URL в ответе Fragment (встречается как payment_url/link/url или внутри HTML)
         if isinstance(obj, dict):
@@ -1736,64 +1758,98 @@ def setup_http_server():
                 return m.group(0)
         return None
 
-    def _fragment_site_is_paid(link_payload: dict) -> bool:
-        # У fragment.com/api нет публичной схемы. Пытаемся угадать по полям/тексту.
-        if not isinstance(link_payload, dict):
-            return False
-        for key in ("paid", "is_paid", "completed", "success"):
-            if link_payload.get(key) is True:
-                return True
-        tx = link_payload.get("transaction")
-        if isinstance(tx, dict):
-            for key in ("paid", "completed", "success"):
-                if tx.get(key) is True:
-                    return True
-            st = tx.get("status") or tx.get("state")
-            if isinstance(st, str) and st.lower() in ("paid", "completed", "success", "done"):
-                return True
-            if isinstance(st, int) and st in (2, 3, 4, 5):
-                return True
-        s = json.dumps(link_payload, ensure_ascii=False).lower()
-        if any(w in s for w in ("paid", "completed", "успеш", "оплачен", "оплачено")):
-            return True
-        return False
+    # --- ezstar: получение адреса получателя (found.recipient), init, getBuyStarsLink → transaction.messages[0] ---
+    async def _fragment_get_recipient_address(username: str) -> tuple:
+        """Поиск получателя (searchStarsRecipient). Возвращает (name, address) как в ezstar."""
+        referer = f"https://fragment.com/stars/buy?recipient={username}&quantity=50"
+        payload = {"query": username, "quantity": "", "method": "searchStarsRecipient"}
+        data = await _fragment_site_post(payload, referer=referer)
+        found = (data or {}).get("found")
+        if not found or not isinstance(found, dict):
+            raise RuntimeError("Fragment: получатель не найден (found)")
+        name = found.get("name")
+        address = found.get("recipient")
+        if not address:
+            raise RuntimeError("Fragment: у получателя нет recipient (address)")
+        return (name or username, str(address).strip())
+
+    async def _fragment_init_buy(recipient_address: str, quantity: int) -> str:
+        """Инициализация покупки (initBuyStarsRequest). recipient = address из found.recipient. Возвращает req_id."""
+        referer = "https://fragment.com/stars/buy?recipient=test&quantity=50"
+        payload = {"recipient": recipient_address, "quantity": int(quantity), "method": "initBuyStarsRequest"}
+        data = await _fragment_site_post(payload, referer=referer)
+        req_id = (data or {}).get("req_id") or (data or {}).get("id")
+        if not req_id:
+            req_id = ((data or {}).get("data") or {}).get("id") if isinstance((data or {}).get("data"), dict) else None
+        if not req_id:
+            raise RuntimeError(f"Fragment initBuyStarsRequest: нет req_id в ответе: {data}")
+        return str(req_id)
+
+    async def _fragment_get_buy_link(req_id: str) -> tuple:
+        """Получение данных для оплаты (getBuyStarsLink). Возвращает (address, amount_nanoton, payload_b64) как в ezstar."""
+        referer = "https://fragment.com/stars/buy?recipient=test&quantity=50"
+        payload = {"transaction": "1", "id": str(req_id), "show_sender": "0", "method": "getBuyStarsLink"}
+        data = await _fragment_site_post(payload, referer=referer)
+        tx = (data or {}).get("transaction")
+        if not tx or not isinstance(tx, dict):
+            raise RuntimeError("Fragment getBuyStarsLink: нет transaction в ответе")
+        messages = tx.get("messages") or []
+        if not messages or not isinstance(messages[0], dict):
+            raise RuntimeError("Fragment getBuyStarsLink: нет transaction.messages[0]")
+        msg = messages[0]
+        address = msg.get("address")
+        amount = msg.get("amount")
+        payload_b64 = msg.get("payload") or ""
+        if not address:
+            raise RuntimeError("Fragment getBuyStarsLink: нет address в messages[0]")
+        if amount is None:
+            raise RuntimeError("Fragment getBuyStarsLink: нет amount в messages[0]")
+        return (str(address).strip(), int(amount), str(payload_b64))
+
+    async def _ton_wallet_send_safe(address: str, amount_nanoton: int, body_payload: str) -> Optional[str]:
+        if not TONAPI_KEY or not MNEMONIC:
+            return None
+        try:
+            from tonutils.client import TonapiClient
+            from tonutils.utils import to_amount
+            from tonutils.wallet import WalletV5R1
+            client = TonapiClient(api_key=TONAPI_KEY, is_testnet=False)
+            wallet, _, _, _ = WalletV5R1.from_mnemonic(client, MNEMONIC)
+            amount_val = to_amount(amount_nanoton, 9, 9)
+            if asyncio.iscoroutinefunction(wallet.transfer):
+                tx_hash = await wallet.transfer(destination=address, amount=amount_val, body=body_payload)
+            else:
+                tx_hash = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: wallet.transfer(destination=address, amount=amount_val, body=body_payload)
+                )
+            return str(tx_hash) if tx_hash else None
+        except Exception as e:
+            logger.exception("TON wallet send error: %s", e)
+            return None
 
     async def _fragment_site_create_star_order(app_: web.Application, *, recipient: str, stars_amount: int) -> dict:
+        """Создание заказа: только валидация + при наличии кошелька не отдаём ссылку (оплата через CryptoBot, затем deliver-stars)."""
         referer = f"https://fragment.com/stars/buy?recipient={recipient}&quantity={stars_amount}"
-
-        # 1) Поиск получателя (иногда возвращается recipient-hash/токен)
         search_payload = {"query": recipient, "quantity": "", "method": "searchStarsRecipient"}
         search = await _fragment_site_post(search_payload, referer=referer)
-        recipient_token = None
-        if isinstance(search, dict):
-            recipient_token = search.get("recipient") or search.get("address") or None
-
-        # 2) Инициализация покупки
-        init_payload = {"recipient": recipient_token or recipient, "quantity": int(stars_amount), "method": "initBuyStarsRequest"}
+        found = (search or {}).get("found")
+        if not found or not isinstance(found, dict) or not found.get("recipient"):
+            raise RuntimeError("Fragment: получатель не найден")
+        if TON_WALLET_ENABLED:
+            return {"success": True, "order_id": None, "payment_url": None, "mode": "wallet"}
+        address = found.get("recipient")
+        init_payload = {"recipient": address, "quantity": int(stars_amount), "method": "initBuyStarsRequest"}
         init = await _fragment_site_post(init_payload, referer=referer)
-        req_id = None
-        if isinstance(init, dict):
-            for k in ("id", "req_id", "request_id", "requestId"):
-                if init.get(k):
-                    req_id = str(init.get(k))
-                    break
+        req_id = (init or {}).get("req_id") or (init or {}).get("id") or str((init or {}).get("data") or {}).get("id", "")
         if not req_id:
-            req_id = str(init.get("data", {}).get("id")) if isinstance(init.get("data"), dict) else None
-        if not req_id or req_id == "None":
-            raise RuntimeError(f"Fragment initBuyStarsRequest: missing id in response: {init}")
-
-        # 3) Получение ссылки оплаты
-        link_payload = {"transaction": "1", "id": req_id, "show_sender": "0", "method": "getBuyStarsLink"}
+            raise RuntimeError(f"Fragment initBuyStarsRequest: нет req_id в ответе: {init}")
+        link_payload = {"transaction": "1", "id": str(req_id), "show_sender": "0", "method": "getBuyStarsLink"}
         link = await _fragment_site_post(link_payload, referer=referer)
         pay_url = _extract_any_url(link)
-        if not pay_url:
-            raise RuntimeError(f"Fragment getBuyStarsLink: payment url not found: {link}")
-
-        orders = app_.get("fragment_site_orders")
-        if isinstance(orders, dict):
-            orders[req_id] = {"type": "stars", "recipient": recipient, "quantity": int(stars_amount), "created_at": time.time()}
-
-        return {"success": True, "order_id": req_id, "payment_url": pay_url, "order": {"search": search, "init": init, "link": link}}
+        if isinstance(app_.get("fragment_site_orders"), dict):
+            app_["fragment_site_orders"][req_id] = {"type": "stars", "recipient": recipient, "quantity": int(stars_amount), "created_at": time.time()}
+        return {"success": True, "order_id": req_id, "payment_url": pay_url or None, "order": {"search": search, "init": init, "link": link}}
 
     # Проверка оплаты (Fragment.com / TonKeeper / CryptoBot).
     async def payment_check_handler(request):
@@ -1868,15 +1924,57 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/payment/check", lambda r: Response(status=204, headers=_cors_headers()))
     
     async def fragment_status_handler(request):
-        """Healthcheck Fragment.com site flow (cookies+hash)."""
+        """Healthcheck Fragment.com (cookies+hash) и TON-кошелька (ezstar)."""
         if not FRAGMENT_SITE_ENABLED:
-            return _json_response({"configured": False, "api_ok": False, "mode": "site"}, status=503)
-        return _json_response({"configured": True, "api_ok": True, "mode": "site"})
+            return _json_response({"configured": False, "api_ok": False, "mode": "site", "wallet_enabled": False}, status=503)
+        return _json_response({
+            "configured": True,
+            "api_ok": True,
+            "mode": "wallet" if TON_WALLET_ENABLED else "site",
+            "wallet_enabled": TON_WALLET_ENABLED,
+        })
 
     app.router.add_get("/api/fragment/status", fragment_status_handler)
     app.router.add_route("OPTIONS", "/api/fragment/status", lambda r: Response(status=204, headers=_cors_headers()))
 
-    # Создание заказа Fragment (звёзды/премиум) — пользователь оплачивает в Fragment/TonKeeper, затем вебхук → payment_check по order_id
+    async def fragment_deliver_stars_handler(request):
+        """Выдача звёзд как в ezstar: бот отправляет TON с своего кошелька в Fragment (get address → init → get link → send TON)."""
+        if not TON_WALLET_ENABLED:
+            return _json_response({"error": "not_configured", "message": "TONAPI_KEY и MNEMONIC не заданы (fragment_site_config.json)"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
+        recipient = (body.get("recipient") or body.get("username") or "").strip().lstrip("@")
+        stars_amount = body.get("stars_amount") or body.get("quantity")
+        if not recipient or not stars_amount:
+            return _json_response({"error": "bad_request", "message": "recipient и stars_amount обязательны"}, status=400)
+        stars_amount = int(stars_amount)
+        if stars_amount < 50 or stars_amount > 1_000_000:
+            return _json_response({"error": "bad_request", "message": "stars_amount 50..1000000"}, status=400)
+        if not FRAGMENT_SITE_ENABLED:
+            return _json_response({"error": "not_configured", "message": "Fragment cookies+hash не заданы"}, status=503)
+        try:
+            _, recipient_address = await _fragment_get_recipient_address(recipient)
+            req_id = await _fragment_init_buy(recipient_address, stars_amount)
+            tx_address, amount_nanoton, payload_b64 = await _fragment_get_buy_link(req_id)
+            payload_decoded = _fragment_encoded(payload_b64)
+            tx_hash = await _ton_wallet_send_safe(tx_address, amount_nanoton, payload_decoded)
+            if not tx_hash:
+                return _json_response({"error": "wallet_error", "message": "Не удалось отправить TON (проверьте баланс и логи)"}, status=502)
+            logger.info("Fragment stars delivered: recipient=%s, amount=%s, tx=%s", recipient, stars_amount, tx_hash)
+            return _json_response({"success": True, "recipient": recipient, "stars_amount": stars_amount, "tx_hash": tx_hash})
+        except RuntimeError as e:
+            logger.warning("Fragment deliver-stars: %s", e)
+            return _json_response({"error": "fragment_error", "message": str(e)}, status=400)
+        except Exception as e:
+            logger.exception("Fragment deliver-stars error: %s", e)
+            return _json_response({"error": "internal_error", "message": str(e)}, status=500)
+
+    app.router.add_post("/api/fragment/deliver-stars", fragment_deliver_stars_handler)
+    app.router.add_route("OPTIONS", "/api/fragment/deliver-stars", lambda r: Response(status=204, headers=_cors_headers()))
+
+    # Создание заказа Fragment: при наличии TON-кошелька — только валидация (оплата CryptoBot → deliver-stars). Иначе — ссылка на оплату TON.
     async def fragment_create_star_order_handler(request):
         """Создать заказ на звёзды: возвращает order_id и payment_url (если API отдаёт), фронт открывает ссылку оплаты TonKeeper"""
         try:
@@ -1893,13 +1991,23 @@ def setup_http_server():
         if not recipient:
             return _json_response({"error": "bad_request", "message": "recipient is required"}, status=400)
 
-        # Fragment.com (site): fragment.com/api по cookies+hash (как в fragment.py)
         if not FRAGMENT_SITE_ENABLED:
             return _json_response({
                 "error": "not_configured",
-                "message": "Set FRAGMENT_SITE_COOKIES + FRAGMENT_SITE_HASH (or aliases FRAGMENT_COOKIES + FRAGMENT_HASH)"
+                "message": "Set FRAGMENT_SITE_COOKIES + FRAGMENT_SITE_HASH (or FRAGMENT_COOKIES + FRAGMENT_HASH)"
             }, status=503)
         try:
+            if TON_WALLET_ENABLED:
+                await _fragment_get_recipient_address(recipient)
+                return _json_response({
+                    "success": True,
+                    "order_id": None,
+                    "payment_url": None,
+                    "stars_amount": stars_amount,
+                    "recipient": recipient,
+                    "mode": "wallet",
+                    "message": "Оплатите через CryptoBot; после оплаты нажмите «Подтвердить оплату» — звёзды будут отправлены автоматически.",
+                })
             res = await _fragment_site_create_star_order(request.app, recipient=recipient, stars_amount=stars_amount)
             return _json_response({
                 "success": True,
@@ -1911,7 +2019,7 @@ def setup_http_server():
                 "mode": "site",
             })
         except Exception as e:
-            logger.error(f"Fragment(site) create star order error: {e}")
+            logger.error(f"Fragment create star order error: {e}")
             return _json_response({"error": "fragment_site_error", "message": str(e)}, status=502)
 
     async def fragment_create_premium_order_handler(request):
