@@ -1868,7 +1868,6 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/payment/check", lambda r: Response(status=204, headers=_cors_headers()))
     
     async def fragment_status_handler(request):
-    async def fragment_status_handler(request):
         """Healthcheck Fragment.com site flow (cookies+hash)."""
         if not FRAGMENT_SITE_ENABLED:
             return _json_response({"configured": False, "api_ok": False, "mode": "site"}, status=503)
