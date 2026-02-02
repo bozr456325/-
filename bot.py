@@ -1670,7 +1670,16 @@ def setup_http_server():
     CRYPTO_PAY_BASE = "https://pay.crypt.bot/api"
 
     # Fragment.com (сайт) — вызов fragment.com/api через cookies + hash (как в ezstar).
-    _fragment_site_cfg = _read_json_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fragment_site_config.json"))
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _fragment_site_cfg = _read_json_file(os.path.join(_script_dir, "fragment_site_config.json"))
+    if not _fragment_site_cfg:
+        _fragment_site_cfg = _read_json_file(os.path.join(os.getcwd(), "fragment_site_config.json"))
+    if not _fragment_site_cfg:
+        _parent_cfg = _read_json_file(os.path.join(os.path.dirname(_script_dir), "fragment_site_config.json"))
+        if _parent_cfg:
+            _fragment_site_cfg = _parent_cfg
+    if not _fragment_site_cfg:
+        logger.warning("fragment_site_config.json не найден (искали в %s и cwd); задайте TONAPI_KEY и MNEMONIC в переменных окружения", _script_dir)
     FRAGMENT_SITE_COOKIES = (
         _get_env_clean("FRAGMENT_SITE_COOKIES")
         or _get_env_clean("FRAGMENT_COOKIES")
@@ -1940,7 +1949,10 @@ def setup_http_server():
     async def fragment_deliver_stars_handler(request):
         """Выдача звёзд как в ezstar: бот отправляет TON с своего кошелька в Fragment (get address → init → get link → send TON)."""
         if not TON_WALLET_ENABLED:
-            return _json_response({"error": "not_configured", "message": "TONAPI_KEY и MNEMONIC не заданы (fragment_site_config.json)"}, status=503)
+            return _json_response({
+                "error": "not_configured",
+                "message": "TONAPI_KEY и MNEMONIC не заданы. Укажите в fragment_site_config.json (рядом с bot.py или в текущей папке) или в переменных окружения TONAPI_KEY и MNEMONIC (24 слова через пробел)."
+            }, status=503)
         try:
             body = await request.json()
         except Exception:
