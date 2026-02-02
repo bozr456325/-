@@ -7,6 +7,7 @@ import base64
 import time
 from io import BytesIO
 from datetime import datetime
+from typing import Optional, Union
 from aiohttp import web
 from aiohttp.web import Response
 import aiohttp
@@ -132,7 +133,7 @@ DONATEHUB_USERNAME = _get_env_clean("DONATEHUB_USERNAME") or _donatehub_cfg_get(
 DONATEHUB_PASSWORD = _get_env_clean("DONATEHUB_PASSWORD") or _donatehub_cfg_get("password", "")
 DONATEHUB_2FA_CODE = _get_env_clean("DONATEHUB_2FA_CODE") or _donatehub_cfg_get("code", "")
 
-_donatehub_token: str | None = None
+_donatehub_token: Optional[str] = None
 _donatehub_token_ts: float = 0.0
 
 def _cors_headers():
@@ -142,7 +143,7 @@ def _cors_headers():
         "Access-Control-Allow-Headers": "*",
     }
 
-def _json_response(payload: dict | list, status: int = 200):
+def _json_response(payload: Union[dict, list], status: int = 200):
     return Response(
         text=json.dumps(payload, ensure_ascii=False),
         status=status,
@@ -217,7 +218,7 @@ async def _convert_to_usd(amount_local: float, currency: str) -> tuple[float, di
     amount_usd = round(float(amount_local) / rate, 2)
     return amount_usd, {"currency": currency, "rate": rate, "course": course}
 
-telethon_client: TelegramClient | None = None
+telethon_client: Optional[TelegramClient] = None
 
 # простой кэш: username -> (ts, payload)
 _tg_lookup_cache: dict[str, tuple[float, dict]] = {}
@@ -390,7 +391,7 @@ def _data_url_from_bytes(image_bytes: bytes) -> str:
     b64 = base64.b64encode(image_bytes).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
 
-async def lookup_user_via_telethon(username: str) -> dict | None:
+async def lookup_user_via_telethon(username: str) -> Optional[dict]:
     """Возвращает {username, firstName, lastName, avatar} для любого @username через userbot."""
     global telethon_client
     if not telethon_client:
@@ -1713,7 +1714,7 @@ def setup_http_server():
                     raise RuntimeError(f"fragment.com/api error {resp.status}: {data}")
                 return data if isinstance(data, dict) else {"data": data}
 
-    def _extract_any_url(obj) -> str | None:
+    def _extract_any_url(obj) -> Optional[str]:
         # Пытаемся найти URL в ответе Fragment (встречается как payment_url/link/url или внутри HTML)
         if isinstance(obj, dict):
             for k in ("payment_url", "paymentUrl", "pay_url", "payUrl", "url", "link"):
@@ -2136,7 +2137,7 @@ async def main():
     http_app = setup_http_server()
     runner = web.AppRunner(http_app)
     await runner.setup()
-    port = int(os.getenv("PORT", "3000"))
+    port = int(os.getenv("PORT") or "3000")
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 HTTP API сервер запущен на порту {port}")
@@ -2152,4 +2153,8 @@ async def main():
         print(f"❌ Ошибка запуска бота: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.exception("Критическая ошибка при запуске: %s", e)
+        raise
