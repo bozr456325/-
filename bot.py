@@ -2212,6 +2212,14 @@ def setup_http_server():
         else:
             payload_data = str(payload_data)[:4096]
 
+        paid_btn_url = WEB_APP_URL or "https://jetstoreapp.ru"
+        try:
+            me = await bot.get_me()
+            if me and getattr(me, "username", None):
+                paid_btn_url = f"https://t.me/{me.username}/app"
+        except Exception:
+            pass
+
         if use_usdt:
             payload_obj = {
                 "currency_type": "crypto",
@@ -2220,7 +2228,7 @@ def setup_http_server():
                 "description": description,
                 "payload": payload_data,
                 "paid_btn_name": "callback",
-                "paid_btn_url": WEB_APP_URL or "https://jetstoreapp.ru",
+                "paid_btn_url": paid_btn_url,
             }
         else:
             payload_obj = {
@@ -2231,7 +2239,7 @@ def setup_http_server():
                 "accepted_assets": "USDT,TON,BTC,ETH,TRX,USDC",
                 "payload": payload_data,
                 "paid_btn_name": "callback",
-                "paid_btn_url": WEB_APP_URL or "https://jetstoreapp.ru",
+                "paid_btn_url": paid_btn_url,
             }
         headers = {
             "Content-Type": "application/json",
