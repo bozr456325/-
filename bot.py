@@ -1469,6 +1469,8 @@ def setup_http_server():
     app["fragment_site_orders"] = {}
     # TON-оплата через Tonkeeper: order_id -> { amount_nanoton, amount_ton, amount_rub, purchase, user_id, created_at }
     app["ton_orders"] = {}
+    # event_id уже использованных входящих TON-переводов (при проверке по сумме без комментария)
+    app["ton_verified_event_ids"] = set()
     # Preflight для CORS
     app.router.add_route('OPTIONS', '/api/telegram/user', lambda r: Response(status=204, headers={
         'Access-Control-Allow-Origin': '*',
@@ -1979,7 +1981,11 @@ def setup_http_server():
                     events = data.get("events") or []
                     want_nanoton = order.get("amount_nanoton") or 0
                     want_comment = order_id
+                    order_created_at = order.get("created_at") or 0
+                    verified_ids = request.app.get("ton_verified_event_ids") or set()
                     for ev in events:
+                        ev_id = ev.get("event_id") or ev.get("eventId") or ""
+                        ev_ts = ev.get("timestamp") or 0
                         for act in ev.get("actions") or []:
                             if act.get("type") == "TonTransfer":
                                 comment = (act.get("comment") or act.get("payload") or "")
@@ -1989,6 +1995,10 @@ def setup_http_server():
                                     comment = str(comment).strip()
                                 amount = int(act.get("amount") or 0)
                                 if comment == want_comment and amount >= max(0, want_nanoton - int(1e6)):
+                                    return _json_response({"paid": True, "order_id": order_id, "method": "ton"})
+                                if not comment and amount >= max(0, want_nanoton - int(1e6)) and ev_ts >= order_created_at - 120 and ev_id and ev_id not in verified_ids:
+                                    verified_ids.add(ev_id)
+                                    request.app["ton_verified_event_ids"] = verified_ids
                                     return _json_response({"paid": True, "order_id": order_id, "method": "ton"})
                 except Exception as e:
                     logger.warning(f"TON payment check failed for order_id={order_id}: {e}")
