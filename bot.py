@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import re
 import base64
 import time
 from io import BytesIO
@@ -1510,6 +1511,29 @@ def setup_http_server():
 
     app.router.add_get('/api/ton-rate', ton_rate_handler)
     app.router.add_route('OPTIONS', '/api/ton-rate', lambda r: Response(status=204, headers=_cors_headers()))
+
+    async def ton_pack_address_handler(request):
+        """Конвертация raw-адреса TON (0:hex) в user-friendly через TonCenter."""
+        raw = request.rel_url.query.get("address", "").strip()
+        if not raw or not re.match(r"^(-1|0):[0-9a-fA-F]{32,64}$", raw):
+            return _json_response({"error": "bad_request", "message": "Invalid raw address"}, status=400)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://toncenter.com/api/v2/packAddress",
+                    params={"address": raw}
+                ) as resp:
+                    data = await resp.json(content_type=None) if resp.content_type else {}
+            result = data.get("result") if data.get("ok") else None
+            if result:
+                return _json_response({"address": result})
+            return _json_response({"error": "toncenter_error"}, status=502)
+        except Exception as e:
+            logger.warning(f"ton packAddress error: {e}")
+            return _json_response({"error": str(e)}, status=502)
+
+    app.router.add_get('/api/ton/pack-address', ton_pack_address_handler)
+    app.router.add_route('OPTIONS', '/api/ton/pack-address', lambda r: Response(status=204, headers=_cors_headers()))
 
     async def telethon_status_handler(request):
         try:
