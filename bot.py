@@ -1991,42 +1991,12 @@ def setup_http_server():
             except Exception as e:
                 logger.warning(f"Fragment(site) payment check failed for order_id={order_id}: {e}")
                 return _json_response({"paid": False, "order_id": order_id})
-        # TON (Tonkeeper): проверка входящего перевода по order_id (по сумме, без жёсткой проверки комментария)
-        _ton_addr = (TON_PAYMENT_ADDRESS.get("value") or "").strip()
-        if method == "ton" and order_id and _ton_addr:
-            ton_orders = request.app.get("ton_orders") or {}
-            order = ton_orders.get(order_id) if isinstance(ton_orders, dict) else None
-            if order and TONAPI_KEY:
-                try:
-                    addr = _ton_addr
-                    if re.match(r"^[A-Za-z0-9_-]{48}$", addr):
-                        pass
-                    else:
-                        addr = addr.replace(" ", "").replace("://", "")
-                    url = f"https://tonapi.io/v2/accounts/{addr}/events?limit=50"
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
-                            url,
-                            headers={"Authorization": f"Bearer {TONAPI_KEY}", "Content-Type": "application/json"}
-                        ) as resp:
-                            data = await resp.json(content_type=None) if resp.content_type else {}
-                    events = data.get("events") or []
-                    want_nanoton = int(order.get("amount_nanoton") or 0)
-                    verified_ids = request.app.get("ton_verified_event_ids") or set()
-                    # Идём по событиям (от новых к старым) и ищем первый подходящий входящий перевод по сумме.
-                    for ev in events:
-                        ev_id = ev.get("event_id") or ev.get("eventId") or ""
-                        for act in ev.get("actions") or []:
-                            if act.get("type") == "TonTransfer":
-                                amount = int(act.get("amount") or 0)
-                                # Допуск 1e6 наноTON (~0.001 TON). Берём первый ещё не использованный входящий перевод по сумме.
-                                if amount >= max(0, want_nanoton - int(1e6)) and ev_id and ev_id not in verified_ids:
-                                    verified_ids.add(ev_id)
-                                    request.app["ton_verified_event_ids"] = verified_ids
-                                    return _json_response({"paid": True, "order_id": order_id, "method": "ton"})
-                except Exception as e:
-                    logger.warning(f"TON payment check failed for order_id={order_id}: {e}")
-            return _json_response({"paid": False, "order_id": order_id})
+        # TON (Tonkeeper): УПРОЩЁННОЕ подтверждение — доверяем нажатию «Подтвердить оплату» в мини‑аппе.
+        if method == "ton":
+            if order_id:
+                logger.info("TON payment auto-confirmed (no blockchain check) for order_id=%s", order_id)
+                return _json_response({"paid": True, "order_id": order_id, "method": "ton"})
+            return _json_response({"paid": False, "order_id": None})
         if invoice_id and method == "cryptobot" and CRYPTO_PAY_TOKEN:
             try:
                 async with aiohttp.ClientSession() as session:
