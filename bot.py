@@ -2012,21 +2012,15 @@ def setup_http_server():
                             data = await resp.json(content_type=None) if resp.content_type else {}
                     events = data.get("events") or []
                     want_nanoton = int(order.get("amount_nanoton") or 0)
-                    order_created_at = float(order.get("created_at") or 0)
                     verified_ids = request.app.get("ton_verified_event_ids") or set()
                     # Идём по событиям (от новых к старым) и ищем первый подходящий входящий перевод по сумме.
                     for ev in events:
                         ev_id = ev.get("event_id") or ev.get("eventId") or ""
-                        ev_ts = ev.get("timestamp") or ev.get("utime") or ev.get("created_at") or 0
-                        try:
-                            ev_ts = float(ev_ts)
-                        except Exception:
-                            ev_ts = 0
                         for act in ev.get("actions") or []:
                             if act.get("type") == "TonTransfer":
                                 amount = int(act.get("amount") or 0)
-                                # Допуск 1e6 наноTON (~0.001 TON), окно по времени 15 минут от времени создания заказа.
-                                if amount >= max(0, want_nanoton - int(1e6)) and ev_ts >= (order_created_at - 900) and ev_id and ev_id not in verified_ids:
+                                # Допуск 1e6 наноTON (~0.001 TON). Берём первый ещё не использованный входящий перевод по сумме.
+                                if amount >= max(0, want_nanoton - int(1e6)) and ev_id and ev_id not in verified_ids:
                                     verified_ids.add(ev_id)
                                     request.app["ton_verified_event_ids"] = verified_ids
                                     return _json_response({"paid": True, "order_id": order_id, "method": "ton"})
