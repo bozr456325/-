@@ -1795,6 +1795,11 @@ def setup_http_server():
         PENDING_SELL_STARS_ORDERS[order_id] = order_data
 
         try:
+            await bot.send_message(
+                telegram_id,
+                "Оплатите счёт для успешной продажи звёзд:",
+                parse_mode=None,
+            )
             await bot.send_invoice(
                 chat_id=telegram_id,
                 title="Продажа звёзд",
