@@ -45,6 +45,7 @@ ADM_WEB_APP_URL = os.getenv("ADM_WEB_APP_URL", "https://jetstoreapp.ru/html/admi
 
 # Группа/чат, куда слать уведомления о продаже звёзд
 SELL_STARS_NOTIFY_CHAT_ID = int(os.getenv("SELL_STARS_NOTIFY_CHAT_ID", "0") or "0")
+TON_NOTIFY_CHAT_ID = int(os.getenv("TON_NOTIFY_CHAT_ID", "0") or "0")
 
 # Курс выплаты за 1 звезду (RUB), используем тот же, что в мини-аппе
 STAR_BUY_RATE_RUB = float(os.getenv("STAR_BUY_RATE_RUB", "0.65") or "0.65")
@@ -1618,6 +1619,83 @@ def setup_http_server():
 
     app.router.add_post("/api/ton/create-order", ton_create_order_handler)
     app.router.add_route("OPTIONS", "/api/ton/create-order", lambda r: Response(status=204, headers=_cors_headers()))
+
+    async def ton_notify_handler(request):
+        """Уведомление в рабочую группу о заявке на покупку TON (ручная обработка)."""
+        if not TON_NOTIFY_CHAT_ID:
+            return _json_response({"error": "not_configured", "message": "TON_NOTIFY_CHAT_ID не задан"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
+
+        purchase = body.get("purchase") or {}
+        method = (body.get("method") or "").strip()
+        total_rub = body.get("total_rub") or body.get("totalAmount") or 0
+        base_rub = body.get("base_rub") or body.get("baseAmount") or 0
+        invoice_id = body.get("invoice_id") or None
+        order_id = body.get("order_id") or None
+        buyer = body.get("buyer") or {}
+
+        wallet = (purchase.get("wallet") or "").strip()
+        network = (purchase.get("network") or "").strip()
+        ton_amount = purchase.get("ton_amount") or purchase.get("tonAmount") or purchase.get("amount_ton") or 0
+
+        if not wallet or not network or not ton_amount:
+            return _json_response({"error": "bad_request", "message": "wallet, network, ton_amount обязательны"}, status=400)
+
+        try:
+            ton_amount = float(ton_amount)
+        except Exception:
+            ton_amount = 0
+        if ton_amount <= 0:
+            return _json_response({"error": "bad_request", "message": "ton_amount должен быть > 0"}, status=400)
+
+        try:
+            total_rub = float(total_rub or 0)
+        except Exception:
+            total_rub = 0.0
+        try:
+            base_rub = float(base_rub or 0)
+        except Exception:
+            base_rub = 0.0
+
+        buyer_id = (buyer.get("id") or buyer.get("user_id") or buyer.get("userId") or "").strip()
+        buyer_username = buyer.get("username") or ""
+        buyer_name = " ".join([str(buyer.get("first_name") or "").strip(), str(buyer.get("last_name") or "").strip()]).strip()
+        buyer_line = ""
+        if buyer_username:
+            buyer_line = f"@{buyer_username}"
+        elif buyer_name:
+            buyer_line = buyer_name
+        elif buyer_id:
+            buyer_line = buyer_id
+        else:
+            buyer_line = "—"
+
+        text = (
+            "🟦 <b>Заявка: покупка TON</b>\n\n"
+            f"Покупатель: {buyer_line}\n"
+            + (f"ID: <code>{buyer_id}</code>\n" if buyer_id else "")
+            + f"Сеть: <b>{network}</b>\n"
+            + f"Кошелёк: <code>{wallet}</code>\n"
+            + f"TON: <b>{ton_amount}</b>\n"
+            + f"Оплата: <b>{total_rub:.2f} ₽</b>\n"
+            + (f"Метод: <b>{method}</b>\n" if method else "")
+            + (f"invoice_id: <code>{invoice_id}</code>\n" if invoice_id else "")
+            + (f"order_id: <code>{order_id}</code>\n" if order_id else "")
+        )
+
+        try:
+            await bot.send_message(TON_NOTIFY_CHAT_ID, text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"TON notify send failed (chat={TON_NOTIFY_CHAT_ID}): {e}")
+            return _json_response({"success": False, "error": "send_failed", "message": "Не удалось отправить уведомление в группу"}, status=502)
+
+        return _json_response({"success": True})
+
+    app.router.add_post("/api/ton/notify", ton_notify_handler)
+    app.router.add_route("OPTIONS", "/api/ton/notify", lambda r: Response(status=204, headers=_cors_headers()))
 
     async def ton_pack_address_handler(request):
         """Конвертация raw-адреса TON (0:hex) в user-friendly через TonCenter."""
