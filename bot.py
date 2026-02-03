@@ -1547,6 +1547,38 @@ def setup_http_server():
         addr = TON_PAYMENT_ADDRESS.get("value") or ""
         if not addr:
             return _json_response({"error": "not_configured", "message": "TON_PAYMENT_ADDRESS не задан"}, status=503)
+        # Нормализуем адрес: TON Connect требует user-friendly адрес (EQ.../UQ...), raw 0:... не подходит.
+        addr = str(addr).strip()
+        # Если случайно передали ссылку ton://transfer/... — вытащим адрес.
+        if addr.startswith("ton://transfer/"):
+            addr = addr[len("ton://transfer/") :]
+            addr = addr.split("?")[0].strip()
+        if addr.startswith("https://") and "/transfer/" in addr:
+            # Tonkeeper transfer link format: https://app.tonkeeper.com/transfer/<addr>?amount=...
+            try:
+                addr = addr.split("/transfer/", 1)[1].split("?", 1)[0].strip()
+            except Exception:
+                pass
+        # raw → user-friendly через TonCenter
+        if re.match(r"^(-1|0):[0-9a-fA-F]{32,64}$", addr):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        "https://toncenter.com/api/v2/packAddress",
+                        params={"address": addr}
+                    ) as resp:
+                        data = await resp.json(content_type=None) if resp.content_type else {}
+                packed = data.get("result") if isinstance(data, dict) and data.get("ok") else None
+                if packed:
+                    addr = str(packed).strip()
+            except Exception as e:
+                logger.warning(f"TON_PAYMENT_ADDRESS packAddress error: {e}")
+        # Валидация: base64url 48 символов, обычно начинается с EQ/UQ
+        if not re.match(r"^[A-Za-z0-9_-]{48}$", addr) or not (addr.startswith("EQ") or addr.startswith("UQ")):
+            return _json_response({
+                "error": "bad_config",
+                "message": "TON_PAYMENT_ADDRESS должен быть user-friendly адресом вида EQ.../UQ... (48 символов) или raw 0:... (он будет упакован автоматически)"
+            }, status=503)
         try:
             body = await request.json()
         except Exception:
