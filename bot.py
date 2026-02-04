@@ -137,30 +137,30 @@ def _get_or_create_ref_user(user_id: int | str) -> dict:
     return REFERRALS[uid]
 
 
-def _process_referral_start(user_id: int, start_text: str | None) -> None:
+def _process_referral_start(user_id: int, start_text: str | None) -> Optional[int]:
     """
     Обработка /start с параметром вида `ref_<id>`.
     Прописываем трёхуровневую иерархию: parent1/2/3 + списки рефералов.
     """
     if not start_text:
-        return
+        return None
     try:
         parts = (start_text or "").strip().split(maxsplit=1)
         if len(parts) < 2:
-            return
+            return None
         arg = parts[1].strip()
         if not arg.startswith("ref_"):
             return
         inviter_raw = arg[4:].strip()
         if not inviter_raw:
-            return
+            return None
         inviter_id = int(inviter_raw)
     except Exception:
-        return
+        return None
 
     if inviter_id == user_id:
         # Нельзя приглашать самого себя
-        return
+        return None
 
     # Загружаем/создаём записи
     _load_referrals()
@@ -168,7 +168,7 @@ def _process_referral_start(user_id: int, start_text: str | None) -> None:
 
     # Если уже есть parent1 — не переписываем привязку
     if u.get("parent1"):
-        return
+        return None
 
     inviter = _get_or_create_ref_user(inviter_id)
     parent1 = str(inviter_id)
@@ -195,6 +195,7 @@ def _process_referral_start(user_id: int, start_text: str | None) -> None:
             p3["referrals_l3"].append(uid_str)
 
     _save_referrals()
+    return inviter_id
 
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or "0")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "") or ""
@@ -724,10 +725,27 @@ async def cmd_start(message: types.Message, state: FSMContext):
         db.update_user_activity(user.id)
 
     # Обработка реферального старта: /start ref_<id>
+    inviter_id: Optional[int] = None
     try:
-        _process_referral_start(user.id, message.text or "")
+        inviter_id = _process_referral_start(user.id, message.text or "")
     except Exception as e:
         logger.warning(f"Ошибка обработки реферального старта /start: {e}")
+
+    # ТЕСТОВОЕ уведомление пригласившему о новом реферале
+    if inviter_id:
+        try:
+            inviter_chat_id = int(inviter_id)
+            ref_user = message.from_user
+            ref_line = ref_user.username and f"@{ref_user.username}" or (ref_user.full_name or str(ref_user.id))
+            text = (
+                "👥 <b>Новый реферал (тестовое уведомление)</b>\n\n"
+                f"Пользователь: {ref_line}\n"
+                f"ID: <code>{ref_user.id}</code>\n"
+                "Перешёл по вашей реферальной ссылке."
+            )
+            await bot.send_message(inviter_chat_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Не удалось отправить тестовое уведомление о реферале пригласившему {inviter_id}: {e}")
 
     username_display = user.username and f"@{user.username}" or user.first_name or "друг"
 
