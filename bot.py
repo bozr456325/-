@@ -95,8 +95,8 @@ def _save_json_file(path: str, data: dict) -> None:
         logger.warning(f"Не удалось сохранить JSON {path}: {e}")
 
 
-def _load_referrals() -> None:
-    """Загружаем реферальные данные из файла один раз при старте."""
+def _load_referrals_sync() -> None:
+    """Синхронная загрузка рефералов из JSON (fallback)."""
     global REFERRALS
     if REFERRALS:
         return
@@ -111,17 +111,45 @@ def _load_referrals() -> None:
     REFERRALS = {}
 
 
-def _save_referrals() -> None:
-    """Сохраняем реферальные данные на диск."""
+def _save_referrals_sync() -> None:
+    """Синхронное сохранение рефералов в JSON (fallback)."""
     try:
         _save_json_file(REFERRALS_FILE, REFERRALS)
     except Exception as e:
         logger.warning(f"Не удалось сохранить реферальные данные: {e}")
 
 
-def _get_or_create_ref_user(user_id: int | str) -> dict:
+async def _load_referrals() -> None:
+    """Загружаем реферальные данные (PostgreSQL или JSON)."""
+    global REFERRALS
+    if REFERRALS:
+        return
+    try:
+        import db as _db
+        if _db.is_enabled():
+            REFERRALS = await _db.ref_load_all()
+            return
+    except Exception as e:
+        logger.warning(f"Ошибка загрузки рефералов из БД: {e}")
+    _load_referrals_sync()
+
+
+async def _save_referrals() -> None:
+    """Сохраняем реферальные данные (PostgreSQL или JSON)."""
+    try:
+        import db as _db
+        if _db.is_enabled():
+            for uid, data in REFERRALS.items():
+                await _db.ref_save(uid, data)
+            return
+    except Exception as e:
+        logger.warning(f"Ошибка сохранения рефералов в БД: {e}")
+    _save_referrals_sync()
+
+
+async def _get_or_create_ref_user(user_id: int | str) -> dict:
     """Возвращает (и при необходимости создаёт) реферальную запись пользователя."""
-    _load_referrals()
+    await _load_referrals()
     uid = str(user_id)
     if uid not in REFERRALS:
         REFERRALS[uid] = {
@@ -137,7 +165,7 @@ def _get_or_create_ref_user(user_id: int | str) -> dict:
     return REFERRALS[uid]
 
 
-def _process_referral_start(user_id: int, start_text: str | None) -> Optional[int]:
+async def _process_referral_start(user_id: int, start_text: str | None) -> Optional[int]:
     """
     Обработка /start с параметром вида `ref_<id>`.
     Прописываем трёхуровневую иерархию: parent1/2/3 + списки рефералов.
@@ -163,14 +191,14 @@ def _process_referral_start(user_id: int, start_text: str | None) -> Optional[in
         return None
 
     # Загружаем/создаём записи
-    _load_referrals()
-    u = _get_or_create_ref_user(user_id)
+    await _load_referrals()
+    u = await _get_or_create_ref_user(user_id)
 
     # Если уже есть parent1 — не переписываем привязку
     if u.get("parent1"):
         return None
 
-    inviter = _get_or_create_ref_user(inviter_id)
+    inviter = await _get_or_create_ref_user(inviter_id)
     parent1 = str(inviter_id)
     parent2 = inviter.get("parent1")
     parent3 = inviter.get("parent2")
@@ -185,16 +213,16 @@ def _process_referral_start(user_id: int, start_text: str | None) -> Optional[in
         inviter["referrals_l1"].append(uid_str)
 
     if parent2:
-        p2 = _get_or_create_ref_user(parent2)
+        p2 = await _get_or_create_ref_user(parent2)
         if uid_str not in p2["referrals_l2"]:
             p2["referrals_l2"].append(uid_str)
 
     if parent3:
-        p3 = _get_or_create_ref_user(parent3)
+        p3 = await _get_or_create_ref_user(parent3)
         if uid_str not in p3["referrals_l3"]:
             p3["referrals_l3"].append(uid_str)
 
-    _save_referrals()
+    await _save_referrals()
     return inviter_id
 
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or "0")
@@ -727,7 +755,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     # Обработка реферального старта: /start ref_<id>
     inviter_id: Optional[int] = None
     try:
-        inviter_id = _process_referral_start(user.id, message.text or "")
+        inviter_id = await _process_referral_start(user.id, message.text or "")
     except Exception as e:
         logger.warning(f"Ошибка обработки реферального старта /start: {e}")
 
@@ -1916,8 +1944,8 @@ def setup_http_server():
             return _json_response({"error": "bad_request", "message": "amount_rub должен быть > 0"}, status=400)
 
         # Обновляем объёмы и доходы по цепочке 1–3 уровень
-        _load_referrals()
-        user_ref = _get_or_create_ref_user(uid)
+        await _load_referrals()
+        user_ref = await _get_or_create_ref_user(uid)
         parent1 = user_ref.get("parent1")
         parent2 = user_ref.get("parent2")
         parent3 = user_ref.get("parent3")
@@ -1930,12 +1958,12 @@ def setup_http_server():
         ):
             if not pid:
                 continue
-            pref = _get_or_create_ref_user(pid)
+            pref = await _get_or_create_ref_user(pid)
             pref["volume_rub"] = float(pref.get("volume_rub") or 0.0) + amount
             bonus = amount * percent
             pref["earned_rub"] = float(pref.get("earned_rub") or 0.0) + bonus
 
-        _save_referrals()
+        await _save_referrals()
         return _json_response({"success": True})
 
     app.router.add_post("/api/referral/purchase", referral_purchase_handler)
@@ -1954,8 +1982,8 @@ def setup_http_server():
         except Exception:
             uid = str(user_id)
 
-        _load_referrals()
-        ref = _get_or_create_ref_user(uid)
+        await _load_referrals()
+        ref = await _get_or_create_ref_user(uid)
 
         # Подсчитываем количество рефералов по уровням
         lvl1 = len(ref.get("referrals_l1") or [])
@@ -2064,8 +2092,8 @@ def setup_http_server():
                 status=400,
             )
 
-        _load_referrals()
-        ref = _get_or_create_ref_user(uid)
+        await _load_referrals()
+        ref = await _get_or_create_ref_user(uid)
         current_balance = float(ref.get("earned_rub") or 0.0)
         if amount > current_balance + 1e-6:
             return _json_response(
@@ -2074,7 +2102,7 @@ def setup_http_server():
             )
 
         ref["earned_rub"] = current_balance - amount
-        _save_referrals()
+        await _save_referrals()
 
         # Пытаемся отправить уведомление в рабочую группу
         if REFERRAL_WITHDRAW_CHAT_ID:
@@ -2961,26 +2989,31 @@ def setup_http_server():
             logger.warning(f"rating_data write error: {e}")
     
     async def rating_leaderboard_handler(request):
-        """GET /api/rating/leaderboard?period=all|month|week|today — покупатели из users_data.json"""
+        """GET /api/rating/leaderboard?period=all|month|week|today — покупатели из PostgreSQL или users_data.json"""
         try:
             period = (request.query.get("period") or "all").lower()
             if period not in ("all", "month", "week", "today"):
                 period = "all"
             
             entries = []
-            rating_prefs = _read_rating_data() or {}
-            
-            # Загружаем пользователей из базы (users_data.json)
-            _script_dir = os.path.dirname(os.path.abspath(__file__))
-            users_data = None
-            for p in [
-                os.path.join(_script_dir, "users_data.json"),
-                os.path.join(os.path.dirname(_script_dir), "users_data.json"),
-                os.path.join(_script_dir, "..", "users_data.json"),
-            ]:
-                if os.path.exists(p):
-                    users_data = _read_json_file(p)
-                    break
+            import db as _db
+            if _db.is_enabled():
+                users_data = await _db.get_users_with_purchases()
+                rating_prefs = await _db.rating_get_all()
+            else:
+                rating_prefs = _read_rating_data() or {}
+                _script_dir = os.path.dirname(os.path.abspath(__file__))
+                users_data = None
+                for p in [
+                    os.path.join(_script_dir, "users_data.json"),
+                    os.path.join(os.path.dirname(_script_dir), "users_data.json"),
+                    os.path.join(_script_dir, "..", "users_data.json"),
+                ]:
+                    if os.path.exists(p):
+                        users_data = _read_json_file(p)
+                        break
+                if not users_data:
+                    users_data = {}
             
             if not users_data or not isinstance(users_data, dict):
                 return _json_response({"entries": []})
@@ -3060,11 +3093,15 @@ def setup_http_server():
             uid = str(body.get("userId") or "").strip()
             if not uid:
                 return _json_response({"error": "userId required"}, status=400)
-            data = _read_rating_data() or {}
-            if uid not in data:
-                data[uid] = {}
-            data[uid]["show_in_rating"] = bool(show)
-            _write_rating_data(data)
+            import db as _db
+            if _db.is_enabled():
+                await _db.rating_set(uid, bool(show))
+            else:
+                data = _read_rating_data() or {}
+                if uid not in data:
+                    data[uid] = {}
+                data[uid]["show_in_rating"] = bool(show)
+                _write_rating_data(data)
             return _json_response({"success": True, "show": show})
         except Exception as e:
             logger.error(f"rating anonymity error: {e}")
@@ -3076,6 +3113,92 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/rating/leaderboard", _rating_cors)
     app.router.add_post("/api/rating/anonymity", rating_anonymity_handler)
     app.router.add_route("OPTIONS", "/api/rating/anonymity", _rating_cors)
+    
+    # API записи покупки: рейтинг + рефералы + users_data.json
+    USERS_DATA_PATHS = [
+        os.path.join(_script_dir, "users_data.json"),
+        os.path.join(os.path.dirname(_script_dir), "users_data.json"),
+    ]
+    
+    def _get_users_data_path():
+        for p in USERS_DATA_PATHS:
+            if os.path.exists(p):
+                return p
+        return USERS_DATA_PATHS[0]
+    
+    async def purchases_record_handler(request):
+        """
+        POST /api/purchases/record
+        Сохраняет покупку в users_data.json, начисляет рефералам.
+        JSON: { user_id, amount_rub, stars_amount?, type?, productName? }
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+            user_id = str(body.get("user_id") or "").strip()
+            amount_rub = float(body.get("amount_rub") or body.get("amount") or 0)
+            stars_amount = int(body.get("stars_amount") or 0)
+            purchase_type = (body.get("type") or "stars").strip()
+            product_name = body.get("productName") or body.get("product_name") or ""
+            username = body.get("username") or ""
+            first_name = body.get("first_name") or ""
+            if not user_id:
+                return _json_response({"error": "user_id required"}, status=400)
+            if amount_rub <= 0:
+                return _json_response({"error": "amount_rub must be > 0"}, status=400)
+            
+            import db as _db
+            if _db.is_enabled():
+                await _db.user_upsert(user_id, username, first_name)
+                await _db.purchase_add(user_id, amount_rub, stars_amount, purchase_type, product_name)
+            else:
+                path = _get_users_data_path()
+                users_data = _read_json_file(path) or {}
+                if user_id not in users_data:
+                    users_data[user_id] = {
+                        "id": int(user_id) if user_id.isdigit() else user_id,
+                        "username": username,
+                        "first_name": first_name,
+                        "purchases": [],
+                    }
+                u = users_data[user_id]
+                if "purchases" not in u:
+                    u["purchases"] = []
+                u["purchases"].append({
+                    "stars_amount": stars_amount or int(amount_rub / 0.65),
+                    "amount": amount_rub,
+                    "type": purchase_type,
+                    "productName": product_name,
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(users_data, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    logger.warning("purchases_record write users_data: %s", e)
+            
+            await _load_referrals()
+            user_ref = await _get_or_create_ref_user(user_id)
+            user_ref["username"] = user_ref.get("username") or username
+            user_ref["first_name"] = user_ref.get("first_name") or first_name
+            for pid, percent in (
+                (user_ref.get("parent1"), 0.15),
+                (user_ref.get("parent2"), 0.20),
+                (user_ref.get("parent3"), 0.25),
+            ):
+                if not pid:
+                    continue
+                pref = await _get_or_create_ref_user(pid)
+                pref["volume_rub"] = float(pref.get("volume_rub") or 0) + amount_rub
+                pref["earned_rub"] = float(pref.get("earned_rub") or 0) + amount_rub * percent
+            await _save_referrals()
+            
+            return _json_response({"success": True})
+        except Exception as e:
+            logger.error("purchases_record error: %s", e)
+            return _json_response({"error": str(e)}, status=500)
+    
+    app.router.add_post("/api/purchases/record", purchases_record_handler)
+    app.router.add_route("OPTIONS", "/api/purchases/record", lambda r: Response(status=204, headers=_cors_headers()))
     
     # Раздача статических файлов мини-аппа (index.html, script.js, style.css, assets/* и т.д.)
     # Открывать: http://localhost:3000/
@@ -3103,6 +3226,13 @@ async def main():
     print("⚠️  Чтобы стать админом, добавьте свой ID в код:")
     print(f"    ADMIN_IDS = [6928639672]  ← замени 6928639672 на свой ID")
     print("=" * 50)
+    
+    # Подключаем PostgreSQL (если задан DATABASE_URL)
+    try:
+        import db
+        await db.init_pool()
+    except Exception as e:
+        logger.warning("PostgreSQL: %s", e)
     
     # Подключаем userbot (Telethon)
     try:
@@ -3134,6 +3264,12 @@ async def main():
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
         print(f"❌ Ошибка запуска бота: {e}")
+    finally:
+        try:
+            import db
+            await db.close_pool()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     try:
