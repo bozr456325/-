@@ -2700,21 +2700,47 @@ def setup_http_server():
 
     # Проверка оплаты (Fragment.com / TonKeeper / CryptoBot).
     async def payment_check_handler(request):
+        """
+        Проверка статуса оплаты.
+        
+        ВАЖНО: Для CryptoBot принимается ТОЛЬКО invoice_id.
+        Вся критичная информация (сумма, тип покупки, получатель) хранится на бэкенде
+        в метаданных инвойса, созданных при вызове create-invoice.
+        """
         try:
             body = await request.json()
         except Exception:
             body = {}
-        purchase = body.get("purchase") or {}
-        purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
-        is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
-        is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
-        order_id = (body.get("order_id") or body.get("orderId") or "").strip()
-        transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
-        invoice_id = body.get("invoice_id")
+        
         method = (body.get("method") or "").strip().lower()
+        invoice_id = body.get("invoice_id")
+        
+        # Для CryptoBot принимаем ТОЛЬКО invoice_id - остальное игнорируем
+        if method == "cryptobot":
+            if not invoice_id:
+                return _json_response({"error": "bad_request", "message": "invoice_id обязателен для CryptoBot"}, status=400)
+            # Продолжаем проверку только с invoice_id
+        else:
+            # Для других методов (Fragment, TON) используем старую логику
+            purchase = body.get("purchase") or {}
+            purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
+            is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
+            is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
+            order_id = (body.get("order_id") or body.get("orderId") or "").strip()
+            transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
+        # Для CryptoBot проверяем только invoice_id (логика ниже)
+        # Для других методов - проверяем Fragment/TON
+        if method != "cryptobot":
+            purchase = body.get("purchase") or {}
+            purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
+            is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
+            is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
+            order_id = (body.get("order_id") or body.get("orderId") or "").strip()
+            transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
+        
         # Fragment.com (site): пробуем проверить статус по order_id (req_id)
         # Важно: пытаемся проверять даже если сервер перезапускался и meta не сохранилось.
-        if is_stars and order_id and FRAGMENT_SITE_ENABLED:
+        if method != "cryptobot" and is_stars and order_id and FRAGMENT_SITE_ENABLED:
             try:
                 site_orders = request.app.get("fragment_site_orders") or {}
                 meta = site_orders.get(order_id) if isinstance(site_orders, dict) else None
@@ -2734,7 +2760,7 @@ def setup_http_server():
                 return _json_response({"paid": False, "order_id": order_id})
         # TON (Tonkeeper): строгая проверка через TonAPI по сумме и уникальному order_id в действии
         _ton_addr = (TON_PAYMENT_ADDRESS.get("value") or "").strip()
-        if method == "ton" and order_id and _ton_addr and TONAPI_KEY:
+        if method != "cryptobot" and method == "ton" and order_id and _ton_addr and TONAPI_KEY:
             ton_orders = request.app.get("ton_orders") or {}
             order = ton_orders.get(order_id) if isinstance(ton_orders, dict) else None
             if order:
@@ -2768,7 +2794,8 @@ def setup_http_server():
                 except Exception as e:
                     logger.warning(f"TON payment check failed for order_id={order_id}: {e}")
             return _json_response({"paid": False, "order_id": order_id})
-        if invoice_id and method == "cryptobot" and CRYPTO_PAY_TOKEN:
+        # CryptoBot: проверка по invoice_id (единственный обязательный параметр)
+        if method == "cryptobot" and invoice_id and CRYPTO_PAY_TOKEN:
             try:
                 # Метаданные инвойса, сохранённые при создании
                 order_meta = None
@@ -2827,13 +2854,21 @@ def setup_http_server():
                                     return _json_response(response_data)
             except Exception as e:
                 logger.warning(f"Crypto Pay check invoice {invoice_id}: {e}")
-        if invoice_id and method == "cryptobot":
+        
+        # CryptoBot: если дошли сюда, значит invoice_id не найден или не оплачен
+        if method == "cryptobot":
             return _json_response({"paid": False})
+        
         # Fragment.com (site flow): если не нашли заказ в памяти — подтвердить оплату не можем.
-        if is_stars or is_premium:
-            return _json_response({"paid": False, "order_id": order_id or None})
-        if transaction_id:
-            pass
+        if method != "cryptobot":
+            purchase = body.get("purchase") or {}
+            purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
+            is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
+            is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
+            order_id = (body.get("order_id") or body.get("orderId") or "").strip()
+            if is_stars or is_premium:
+                return _json_response({"paid": False, "order_id": order_id or None})
+        
         return _json_response({"paid": False})
     
     app.router.add_post("/api/payment/check", payment_check_handler)
@@ -3039,9 +3074,17 @@ def setup_http_server():
                 except (TypeError, ValueError):
                     stars_amount = 0
                 login = (purchase.get("login") or "").strip().lstrip("@")
-                if stars_amount <= 0 or not login:
+                if stars_amount < 50:
                     return _json_response(
-                        {"error": "bad_request", "message": "Неверные данные покупки звёзд"}, status=400
+                        {"error": "bad_request", "message": "Минимальное количество звёзд: 50"}, status=400
+                    )
+                if stars_amount > 1_000_000:
+                    return _json_response(
+                        {"error": "bad_request", "message": "Максимальное количество звёзд: 1,000,000"}, status=400
+                    )
+                if not login:
+                    return _json_response(
+                        {"error": "bad_request", "message": "Укажите получателя звёзд"}, status=400
                     )
                 amount = round(stars_amount * STAR_PRICE_RUB, 2)
                 if amount < 1:
@@ -3227,10 +3270,160 @@ def setup_http_server():
             logger.error(f"Crypto Pay getInvoices error: {e}")
             return _json_response({"paid": False, "error": str(e)}, status=500)
 
+    async def cryptobot_webhook_handler(request):
+        """
+        Webhook для CryptoBot: автоматическая выдача товаров и запись покупок при оплате инвойса.
+        
+        CryptoBot отправляет POST запросы с данными об изменении статуса инвойса.
+        Формат: { "update_id": int, "update_type": "invoice_paid", "request": { "invoice_id": int, ... } }
+        """
+        if not CRYPTO_PAY_TOKEN:
+            return _json_response({"error": "not_configured"}, status=503)
+        
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
+        
+        update_type = body.get("update_type") or ""
+        request_data = body.get("request") or {}
+        invoice_id = request_data.get("invoice_id")
+        
+        # Обрабатываем только событие оплаты инвойса
+        if update_type != "invoice_paid" or not invoice_id:
+            return _json_response({"ok": True, "message": "ignored"})
+        
+        try:
+            # Получаем метаданные инвойса
+            orders = request.app.get("cryptobot_orders")
+            order_meta = None
+            if isinstance(orders, dict):
+                order_meta = orders.get(str(invoice_id))
+            
+            if not order_meta:
+                logger.warning(f"CryptoBot webhook: order_meta not found for invoice_id={invoice_id}")
+                return _json_response({"ok": True, "message": "order_meta_not_found"})
+            
+            # Проверяем, что товар ещё не был выдан
+            if order_meta.get("delivered"):
+                logger.info(f"CryptoBot webhook: invoice_id={invoice_id} already delivered, skipping")
+                return _json_response({"ok": True, "message": "already_delivered"})
+            
+            context = order_meta.get("context")
+            purchase = order_meta.get("purchase") or {}
+            user_id = order_meta.get("user_id") or "unknown"
+            amount_rub = order_meta.get("amount_rub") or 0.0
+            
+            # Выдача товара в зависимости от типа покупки
+            if context == "purchase":
+                purchase_type = purchase.get("type") or ""
+                
+                if purchase_type == "stars":
+                    # Выдача звёзд через Fragment
+                    recipient = (purchase.get("login") or "").strip().lstrip("@")
+                    stars_amount = int(purchase.get("stars_amount") or 0)
+                    
+                    if recipient and stars_amount >= 50:
+                        try:
+                            # Вызываем внутреннюю функцию выдачи звёзд
+                            if TON_WALLET_ENABLED:
+                                _, recipient_address = await _fragment_get_recipient_address(recipient)
+                                req_id = await _fragment_init_buy(recipient_address, stars_amount)
+                                tx_address, amount_nanoton, payload_b64 = await _fragment_get_buy_link(req_id)
+                                payload_decoded = _fragment_encoded(payload_b64)
+                                tx_hash, send_err = await _ton_wallet_send_safe(tx_address, amount_nanoton, payload_decoded)
+                                if tx_hash:
+                                    logger.info(f"CryptoBot webhook: stars delivered via Fragment, invoice_id={invoice_id}, recipient={recipient}, stars={stars_amount}, tx={tx_hash}")
+                                    # Помечаем как выданное
+                                    if isinstance(orders, dict):
+                                        orders[str(invoice_id)]["delivered"] = True
+                                else:
+                                    logger.error(f"CryptoBot webhook: failed to deliver stars, invoice_id={invoice_id}, error={send_err}")
+                        except Exception as e:
+                            logger.exception(f"CryptoBot webhook: error delivering stars for invoice_id={invoice_id}: {e}")
+                
+                elif purchase_type == "premium":
+                    # Выдача Premium (если будет реализовано)
+                    recipient = (purchase.get("login") or "").strip().lstrip("@")
+                    months = int(purchase.get("months") or 0)
+                    logger.info(f"CryptoBot webhook: premium purchase detected, invoice_id={invoice_id}, recipient={recipient}, months={months}")
+                    # TODO: реализовать выдачу Premium через Fragment API
+                    if isinstance(orders, dict):
+                        orders[str(invoice_id)]["delivered"] = True
+                
+                elif purchase_type == "steam":
+                    # Пополнение Steam через DonateHub (если будет реализовано)
+                    account = (purchase.get("login") or "").strip()
+                    amount = float(purchase.get("amount") or amount_rub)
+                    logger.info(f"CryptoBot webhook: steam purchase detected, invoice_id={invoice_id}, account={account}, amount={amount}")
+                    # TODO: реализовать пополнение Steam через DonateHub API
+                    if isinstance(orders, dict):
+                        orders[str(invoice_id)]["delivered"] = True
+                
+                # Записываем покупку в базу данных (рейтинг + рефералы)
+                try:
+                    import db as _db
+                    purchase_type_str = purchase_type
+                    product_name = purchase.get("productName") or purchase.get("product_name") or ""
+                    stars_amount_for_record = int(purchase.get("stars_amount") or 0)
+                    
+                    if _db.is_enabled():
+                        await _db.user_upsert(user_id, purchase.get("username") or "", purchase.get("first_name") or "")
+                        await _db.purchase_add(user_id, amount_rub, stars_amount_for_record, purchase_type_str, product_name)
+                    else:
+                        # Fallback на JSON файл
+                        path = _get_users_data_path()
+                        users_data = _read_json_file(path) or {}
+                        if user_id not in users_data:
+                            users_data[user_id] = {
+                                "id": int(user_id) if user_id.isdigit() else user_id,
+                                "username": purchase.get("username") or "",
+                                "first_name": purchase.get("first_name") or "",
+                                "purchases": [],
+                            }
+                        u = users_data[user_id]
+                        if "purchases" not in u:
+                            u["purchases"] = []
+                        u["purchases"].append({
+                            "stars_amount": stars_amount_for_record,
+                            "amount": amount_rub,
+                            "type": purchase_type_str,
+                            "productName": product_name,
+                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        })
+                        try:
+                            with open(path, "w", encoding="utf-8") as f:
+                                json.dump(users_data, f, ensure_ascii=False, indent=2)
+                        except Exception as file_err:
+                            logger.warning(f"Failed to write users_data.json: {file_err}")
+                    
+                    # Обновление рефералов
+                    try:
+                        import db as _db
+                        if _db.is_enabled():
+                            ref_data = await _db.referral_get(user_id)
+                            if ref_data and ref_data.get("referrer_id"):
+                                percent = float(ref_data.get("percent") or 0.05)
+                                await _db.referral_add_earnings(ref_data["referrer_id"], amount_rub, percent)
+                    except Exception as ref_err:
+                        logger.warning(f"Failed to update referrals: {ref_err}")
+                    
+                    logger.info(f"CryptoBot webhook: purchase recorded, invoice_id={invoice_id}, user_id={user_id}, amount_rub={amount_rub}")
+                except Exception as record_err:
+                    logger.exception(f"CryptoBot webhook: error recording purchase for invoice_id={invoice_id}: {record_err}")
+            
+            return _json_response({"ok": True, "message": "processed"})
+            
+        except Exception as e:
+            logger.exception(f"CryptoBot webhook error for invoice_id={invoice_id}: {e}")
+            return _json_response({"error": "internal_error", "message": str(e)}, status=500)
+    
     app.router.add_post("/api/cryptobot/create-invoice", cryptobot_create_invoice_handler)
     app.router.add_route("OPTIONS", "/api/cryptobot/create-invoice", lambda r: Response(status=204, headers=_cors_headers()))
     app.router.add_post("/api/cryptobot/check-invoice", cryptobot_check_invoice_handler)
     app.router.add_route("OPTIONS", "/api/cryptobot/check-invoice", lambda r: Response(status=204, headers=_cors_headers()))
+    app.router.add_post("/api/cryptobot/webhook", cryptobot_webhook_handler)
+    app.router.add_route("OPTIONS", "/api/cryptobot/webhook", lambda r: Response(status=204, headers=_cors_headers()))
     
     # Рейтинг покупателей
     RATING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rating_data.json")
