@@ -1759,6 +1759,21 @@ def setup_http_server():
             )
 
     app = web.Application(middlewares=[error_middleware])
+    
+    # Вспомогательная функция для получения пути к users_data.json
+    # (определяем здесь, чтобы использовать в вебхуках и других хендлерах)
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    USERS_DATA_PATHS = [
+        os.path.join(_script_dir, "users_data.json"),
+        os.path.join(os.path.dirname(_script_dir), "users_data.json"),
+    ]
+    
+    def _get_users_data_path():
+        for p in USERS_DATA_PATHS:
+            if os.path.exists(p):
+                return p
+        return USERS_DATA_PATHS[0]
+    
     # Хранилище заказов Fragment.com (через сайт fragment.com/api по cookies+hash)
     # Заказы Fragment.com (через сайт fragment.com/api по cookies+hash)
     # order_id -> meta (type, recipient, quantity, created_at)
@@ -3415,7 +3430,8 @@ def setup_http_server():
             return _json_response({"ok": True, "message": "processed"})
             
         except Exception as e:
-            logger.exception(f"CryptoBot webhook error for invoice_id={invoice_id}: {e}")
+            invoice_id_str = str(invoice_id) if invoice_id else "unknown"
+            logger.exception(f"CryptoBot webhook error for invoice_id={invoice_id_str}: {e}")
             return _json_response({"error": "internal_error", "message": str(e)}, status=500)
     
     app.router.add_post("/api/cryptobot/create-invoice", cryptobot_create_invoice_handler)
@@ -3565,17 +3581,7 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/rating/anonymity", _rating_cors)
     
     # API записи покупки: рейтинг + рефералы + users_data.json
-    USERS_DATA_PATHS = [
-        os.path.join(_script_dir, "users_data.json"),
-        os.path.join(os.path.dirname(_script_dir), "users_data.json"),
-    ]
-    
-    def _get_users_data_path():
-        for p in USERS_DATA_PATHS:
-            if os.path.exists(p):
-                return p
-        return USERS_DATA_PATHS[0]
-    
+    # (функция _get_users_data_path уже определена выше)
     async def purchases_record_handler(request):
         """
         POST /api/purchases/record
