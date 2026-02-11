@@ -51,9 +51,13 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6928639672,5235957477").spl
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://jetstoreapp.ru")
 ADM_WEB_APP_URL = os.getenv("ADM_WEB_APP_URL", "https://jetstoreapp.ru/html/admin.html")
 
-# Группа/чат, куда слать уведомления о продаже звёзд
+# Группы/чаты для уведомлений
+# SELL_STARS_NOTIFY_CHAT_ID: уведомления о продаже звёзд
+# TON_NOTIFY_CHAT_ID: заявки на покупку TON
+# IDEAS_CHAT_ID: идеи/предложения из мини‑приложения
 SELL_STARS_NOTIFY_CHAT_ID = int(os.getenv("SELL_STARS_NOTIFY_CHAT_ID", "0") or "0")
 TON_NOTIFY_CHAT_ID = int(os.getenv("TON_NOTIFY_CHAT_ID", "0") or "0")
+IDEAS_CHAT_ID = int(os.getenv("IDEAS_CHAT_ID", "0") or "0")
 
 # Курс выплаты за 1 звезду (RUB), используем тот же, что в мини-аппе
 STAR_BUY_RATE_RUB = float(os.getenv("STAR_BUY_RATE_RUB", "0.65") or "0.65")
@@ -1920,6 +1924,64 @@ def setup_http_server():
             })
 
     app.router.add_get('/api/config', api_config_handler)
+
+    async def idea_submit_handler(request):
+        """
+        POST /api/idea/submit
+        Принимает идею/предложение из мини‑приложения и пересылает её в служебный чат IDEAS_CHAT_ID.
+        JSON: { "user_id": "...", "username": "...", "first_name": "...", "text": "...", "source": "webapp_main" }
+        """
+        try:
+            try:
+                body = await request.json()
+            except Exception:
+                return _json_response({"success": False, "error": "bad_request", "message": "Invalid JSON"}, status=400)
+
+            text = (body.get("text") or "").strip()
+            if len(text) < 5:
+                return _json_response({"success": False, "error": "too_short", "message": "Идея слишком короткая"}, status=400)
+            if len(text) > 500:
+                text = text[:500]
+
+            user_id = str(body.get("user_id") or "").strip()
+            username = (body.get("username") or "").strip()
+            first_name = (body.get("first_name") or "").strip()
+            source = (body.get("source") or "webapp").strip() or "webapp"
+
+            header = "💡 <b>Новая идея из мини‑приложения</b>\n\n"
+            user_line = ""
+            if username:
+                user_line = f"От: @{username}"
+            elif first_name or user_id:
+                user_line = f"От: {first_name or 'пользователь'}"
+                if user_id:
+                    user_line += f" (ID: <code>{user_id}</code>)"
+            if not user_line and user_id:
+                user_line = f"От: ID <code>{user_id}</code>"
+            if not user_line:
+                user_line = "От: неизвестный пользователь"
+
+            source_line = f"\nИсточник: <code>{source}</code>"
+            idea_block = f"\n\nТекст идеи:\n<code>{text}</code>"
+
+            full_text = header + user_line + source_line + idea_block
+
+            if IDEAS_CHAT_ID:
+                try:
+                    await bot.send_message(IDEAS_CHAT_ID, full_text, parse_mode="HTML", disable_web_page_preview=True)
+                except Exception as e:
+                    logger.warning(f"Failed to send idea to IDEAS_CHAT_ID={IDEAS_CHAT_ID}: {e}")
+                    return _json_response({"success": False, "error": "send_failed", "message": "Не удалось отправить идею. Попробуйте позже."}, status=502)
+            else:
+                logger.warning("IDEAS_CHAT_ID not set; idea text:\n%s", full_text)
+
+            return _json_response({"success": True})
+        except Exception as e:
+            logger.exception(f"/api/idea/submit error: {e}")
+            return _json_response({"success": False, "error": "internal_error", "message": "Внутренняя ошибка сервера"}, status=500)
+
+    app.router.add_post('/api/idea/submit', idea_submit_handler)
+    app.router.add_route('OPTIONS', '/api/idea/submit', lambda r: Response(status=204, headers=_cors_headers()))
 
     async def ton_rate_handler(request):
         """Курс TON→RUB через CoinPaprika (прокси для обхода CORS в Telegram WebView)."""
