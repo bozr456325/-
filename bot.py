@@ -244,6 +244,76 @@ async def _get_or_create_ref_user(user_id: int | str) -> dict:
     return REFERRALS[uid]
 
 
+async def _apply_referral_earnings_for_purchase(
+    user_id: str | int,
+    amount_rub: float,
+    username: str = "",
+    first_name: str = "",
+) -> None:
+    """
+    Начисляет реферальные проценты за покупку пользователя по цепочке parent1/parent2/parent3.
+    Работает и для PostgreSQL (через db.py), и для JSON-фоллбэка (REFERRALS dict + referrals_data.json).
+    """
+    try:
+        amount = float(amount_rub or 0)
+    except Exception:
+        return
+    if amount <= 0:
+        return
+
+    uid = str(user_id).strip()
+    if not uid:
+        return
+
+    # 1) PostgreSQL путь (если включён)
+    try:
+        import db as _db
+        if _db.is_enabled():
+            uref = await _db.ref_get_or_create(uid)
+            # Обновим минимально профильные поля (не критично, но полезно)
+            try:
+                if (username or first_name) and isinstance(uref, dict):
+                    uref["username"] = uref.get("username") or (username or "")
+                    uref["first_name"] = uref.get("first_name") or (first_name or "")
+                    await _db.ref_save(uid, uref)
+            except Exception:
+                pass
+
+            for pid, percent in (
+                (uref.get("parent1"), 0.15),
+                (uref.get("parent2"), 0.20),
+                (uref.get("parent3"), 0.25),
+            ):
+                if not pid:
+                    continue
+                earned_delta = amount * percent
+                await _db.ref_add_earned(str(pid), amount, earned_delta)
+            return
+    except Exception as e:
+        logger.warning(f"Referral earnings (DB) failed, fallback to JSON: {e}")
+
+    # 2) JSON fallback
+    await _load_referrals()
+    user_ref = await _get_or_create_ref_user(uid)
+    if username and not user_ref.get("username"):
+        user_ref["username"] = username
+    if first_name and not user_ref.get("first_name"):
+        user_ref["first_name"] = first_name
+
+    for pid, percent in (
+        (user_ref.get("parent1"), 0.15),
+        (user_ref.get("parent2"), 0.20),
+        (user_ref.get("parent3"), 0.25),
+    ):
+        if not pid:
+            continue
+        pref = await _get_or_create_ref_user(pid)
+        pref["volume_rub"] = float(pref.get("volume_rub") or 0.0) + amount
+        pref["earned_rub"] = float(pref.get("earned_rub") or 0.0) + amount * percent
+
+    await _save_referrals()
+
+
 async def _process_referral_start(user_id: int, start_text: str | None) -> Optional[int]:
     """
     Обработка /start с параметром вида `ref_<id>`.
@@ -3620,7 +3690,7 @@ def setup_http_server():
                             notify_text,
                         )
                 
-                # Записываем покупку в базу данных (рейтинг + рефералы)
+                # Записываем покупку в базу данных (рейтинг) + начисляем рефералы
                 try:
                     import db as _db
                     purchase_type_str = purchase_type
@@ -3665,17 +3735,17 @@ def setup_http_server():
                                 json.dump(users_data, f, ensure_ascii=False, indent=2)
                         except Exception as file_err:
                             logger.warning(f"Failed to write users_data.json: {file_err}")
-                    
-                    # Обновление рефералов
+
+                    # Начисление рефералов (по parent1/2/3 из нашей реф.системы)
                     try:
-                        import db as _db
-                        if _db.is_enabled():
-                            ref_data = await _db.referral_get(user_id)
-                            if ref_data and ref_data.get("referrer_id"):
-                                percent = float(ref_data.get("percent") or 0.05)
-                                await _db.referral_add_earnings(ref_data["referrer_id"], amount_rub, percent)
+                        await _apply_referral_earnings_for_purchase(
+                            user_id=user_id,
+                            amount_rub=amount_rub,
+                            username=purchase.get("username") or "",
+                            first_name=purchase.get("first_name") or "",
+                        )
                     except Exception as ref_err:
-                        logger.warning(f"Failed to update referrals: {ref_err}")
+                        logger.warning(f"Failed to update referral earnings: {ref_err}")
                     
                     logger.info(f"CryptoBot webhook: purchase recorded, invoice_id={invoice_id}, user_id={user_id}, amount_rub={amount_rub}")
                 except Exception as record_err:
@@ -3891,21 +3961,12 @@ def setup_http_server():
                         logger.warning("purchases_record write users_data: %s", e)
             
             if not rating_only:
-                await _load_referrals()
-                user_ref = await _get_or_create_ref_user(user_id)
-                user_ref["username"] = user_ref.get("username") or username
-                user_ref["first_name"] = user_ref.get("first_name") or first_name
-                for pid, percent in (
-                    (user_ref.get("parent1"), 0.15),
-                    (user_ref.get("parent2"), 0.20),
-                    (user_ref.get("parent3"), 0.25),
-                ):
-                    if not pid:
-                        continue
-                    pref = await _get_or_create_ref_user(pid)
-                    pref["volume_rub"] = float(pref.get("volume_rub") or 0) + amount_rub
-                    pref["earned_rub"] = float(pref.get("earned_rub") or 0) + amount_rub * percent
-                await _save_referrals()
+                await _apply_referral_earnings_for_purchase(
+                    user_id=user_id,
+                    amount_rub=amount_rub,
+                    username=username,
+                    first_name=first_name,
+                )
             
             return _json_response({"success": True})
         except Exception as e:
