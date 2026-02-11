@@ -751,6 +751,7 @@ async def lookup_user_via_telethon(username: str) -> Optional[dict]:
 # ============ СОСТОЯНИЯ ============
 
 class UserStates(StatesGroup):
+    # выбор языка больше не используется
     choosing_language = State()
 
 class AdminStates(StatesGroup):
@@ -772,29 +773,23 @@ def is_admin(user_id: int) -> bool:
     return db.is_admin(user_id)
 
 def get_main_menu(language: str = 'ru'):
-    """Главное меню на выбранном языке"""
+    """Главное меню на выбранном языке (две кнопки: открыть приложение / подписаться на канал)"""
     if language == 'en':
         keyboard = [
             [
-                InlineKeyboardButton(text="📈 Trade on jet", web_app=WebAppInfo(url=WEB_APP_URL)),
+                InlineKeyboardButton(text="🚀 Open app", web_app=WebAppInfo(url=WEB_APP_URL)),
             ],
             [
-                InlineKeyboardButton(text="📰 Channel", url="https://t.me/JetStoreApp"),
-            ],
-            [
-                InlineKeyboardButton(text="ℹ️ About us", callback_data="about_info")
+                InlineKeyboardButton(text="📰 Subscribe to channel", url="https://t.me/JetStoreApp"),
             ]
         ]
     else:
         keyboard = [
             [
-                InlineKeyboardButton(text="📈 Торговля на Jet", web_app=WebAppInfo(url=WEB_APP_URL)),
+                InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL)),
             ],
             [
-                InlineKeyboardButton(text="📰 Канал", url="https://t.me/JetStoreApp"),
-            ],
-            [
-                InlineKeyboardButton(text="ℹ️ О нас", callback_data="about_info")
+                InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
             ]
         ]
     
@@ -3038,6 +3033,20 @@ def setup_http_server():
                                                         parse_mode="HTML",
                                                         disable_web_page_preview=True,
                                                     )
+                                                    # Начисляем реферальный процент за покупку Steam,
+                                                    # если известно user_id и сумма в рублях.
+                                                    try:
+                                                        uid = str(order_meta.get("user_id") or "").strip()
+                                                        if uid and amount_rub:
+                                                            await _apply_referral_earnings_for_purchase(
+                                                                user_id=uid,
+                                                                amount_rub=amount_rub,
+                                                                username=purchase_meta.get("username") or "",
+                                                                first_name=purchase_meta.get("first_name") or "",
+                                                            )
+                                                    except Exception as ref_err:
+                                                        logger.warning(f"Failed to apply referral earnings for Steam (payment_check): {ref_err}")
+
                                                     order_meta["delivered"] = True
                                                     try:
                                                         orders = request.app.get("cryptobot_orders")
@@ -3999,7 +4008,7 @@ async def main():
     print(f"🌐 Web App: {WEB_APP_URL}")
     print("=" * 50)
     print("📝 Основные команды:")
-    print("   • /start - Главное меню (выбор языка)")
+    print("   • /start - Главное меню (открыть приложение)")
     print("   • /admin - Админ панель")
     print("   • /id - Узнать свой ID и статус")
     print("   • /users - Статистика пользователей (админы)")
