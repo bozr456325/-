@@ -88,11 +88,15 @@ PENDING_SELL_STARS_ORDERS: dict[str, dict] = {}
 #   "earned_rub": float, "volume_rub": float
 # }
 REFERRALS: dict[str, dict] = {}
-REFERRALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "referrals_data.json")
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REFERRALS_FILE = os.path.join(_SCRIPT_DIR, "referrals_data.json")
 
 # Ключ для шифрования ID в реферальной ссылке (XOR + base62 = короткая ссылка)
 REFERRAL_ENC_KEY = (os.getenv("REFERRAL_ENC_KEY", "jet_ref_2024_secret") or "").encode()[:32].ljust(32, b"0")
 _B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+# Ограничение по отправке идей: один запрос раз в 12 часов на пользователя
+IDEAS_LIMITS_FILE = os.path.join(_SCRIPT_DIR, "ideas_limits.json")
 
 
 def _ref_secret_int() -> int:
@@ -770,6 +774,9 @@ def get_main_menu(language: str = 'ru'):
             ],
             [
                 InlineKeyboardButton(text="📰 Subscribe to channel", url="https://t.me/JetStoreApp"),
+            ],
+            [
+                InlineKeyboardButton(text="❓ Help", callback_data="help_info"),
             ]
         ]
     else:
@@ -779,6 +786,9 @@ def get_main_menu(language: str = 'ru'):
             ],
             [
                 InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
+            ],
+            [
+                InlineKeyboardButton(text="❓ Помощь", callback_data="help_info"),
             ]
         ]
     
@@ -789,16 +799,20 @@ def get_about_menu(language: str = 'ru'):
     if language == 'en':
         keyboard = [
             [
-                InlineKeyboardButton(text="📞 Support", url="https://t.me/your_support"),
-                InlineKeyboardButton(text="📢 Info channel", url="https://t.me/your_channel")
+                InlineKeyboardButton(text="📞 Support", url="https://t.me/L3ZTADM"),
+                InlineKeyboardButton(text="📢 Info channel", url="https://t.me/JetStoreApp")
+            ],
+            [
+                InlineKeyboardButton(text="📄 Offer agreement", 
+                                   url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
             ],
             [
                 InlineKeyboardButton(text="📜 User agreement", 
-                                   web_app=WebAppInfo(url=f"{WEB_APP_URL}/agreement")),
+                                   url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
             ],
             [
                 InlineKeyboardButton(text="🔒 Privacy policy", 
-                                   web_app=WebAppInfo(url=f"{WEB_APP_URL}/privacy")),
+                                   url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
             ],
             [
                 InlineKeyboardButton(text="🔙 Back", callback_data="back_to_main")
@@ -807,16 +821,20 @@ def get_about_menu(language: str = 'ru'):
     else:
         keyboard = [
             [
-                InlineKeyboardButton(text="📞 Поддержка", url="https://t.me/ваш_поддержка"),
-                InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/ваш_канал")
+                InlineKeyboardButton(text="📞 Помощь", url="https://t.me/L3ZTADM"),
+                InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/JetStoreApp")
+            ],
+            [
+                InlineKeyboardButton(text="📄 Договор оферты", 
+                                   url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
             ],
             [
                 InlineKeyboardButton(text="📜 Пользовательское соглашение", 
-                                   web_app=WebAppInfo(url=f"{WEB_APP_URL}/agreement")),
+                                   url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
             ],
             [
                 InlineKeyboardButton(text="🔒 Политика конфиденциальности", 
-                                   web_app=WebAppInfo(url=f"{WEB_APP_URL}/privacy")),
+                                   url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
             ],
             [
                 InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
@@ -892,22 +910,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         inviter_id = await _process_referral_start(user.id, message.text or "")
     except Exception as e:
         logger.warning(f"Ошибка обработки реферального старта /start: {e}")
-
-    # ТЕСТОВОЕ уведомление пригласившему о новом реферале
-    if inviter_id:
-        try:
-            inviter_chat_id = int(inviter_id)
-            ref_user = message.from_user
-            ref_line = ref_user.username and f"@{ref_user.username}" or (ref_user.full_name or str(ref_user.id))
-            text = (
-                "👥 <b>Новый реферал (тестовое уведомление)</b>\n\n"
-                f"Пользователь: {ref_line}\n"
-                f"ID: <code>{ref_user.id}</code>\n"
-                "Перешёл по вашей реферальной ссылке."
-            )
-            await bot.send_message(inviter_chat_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.warning(f"Не удалось отправить тестовое уведомление о реферале пригласившему {inviter_id}: {e}")
 
     username_display = user.username and f"@{user.username}" or user.first_name or "друг"
     language = db.get_user_language(user.id)
@@ -1586,6 +1588,24 @@ async def show_about(callback_query: types.CallbackQuery):
     )
     await callback_query.answer()
 
+# ============ КНОПКА "ПОМОЩЬ" ============
+
+@dp.callback_query(F.data == "help_info")
+async def show_help(callback_query: types.CallbackQuery):
+    """Раздел 'Помощь и контакты'"""
+    help_text = (
+        "💡 <b>Помощь и контакты</b>\n\n"
+        "Если есть вопросы — пишите <a href=\"https://t.me/L3ZTADM\">@L3ZTADM</a>\n\n"
+        "📄 Договор оферты: "
+        "<a href=\"https://telegra.ph/Dogovor-Oferty-02-11-4\">читать</a>\n"
+        "🔒 Политика конфиденциальности: "
+        "<a href=\"https://telegra.ph/Politika-konfidecialnosti-02-11\">читать</a>\n"
+        "📜 Пользовательское соглашение: "
+        "<a href=\"https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33\">читать</a>"
+    )
+    await callback_query.message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
+    await callback_query.answer()
+
 # ============ ПРОФИЛЬ ============
 
 
@@ -1913,8 +1933,8 @@ def setup_http_server():
     async def idea_submit_handler(request):
         """
         POST /api/idea/submit
-        Принимает идею/предложение из мини‑приложения и пересылает её в служебный чат IDEAS_CHAT_ID.
-        JSON: { "user_id": "...", "username": "...", "first_name": "...", "text": "...", "source": "webapp_main" }
+        Принимает идею/предложение и пересылает её в служебный чат IDEAS_CHAT_ID.
+        JSON: { "user_id": "...", "username": "...", "first_name": "...", "text": "..." }
         """
         try:
             try:
@@ -1928,12 +1948,54 @@ def setup_http_server():
             if len(text) > 500:
                 text = text[:500]
 
-            user_id = str(body.get("user_id") or "").strip()
+            user_id_raw = body.get("user_id")
+            user_id = str(user_id_raw or "").strip()
             username = (body.get("username") or "").strip()
             first_name = (body.get("first_name") or "").strip()
-            source = (body.get("source") or "webapp").strip() or "webapp"
 
-            header = "💡 <b>Новая идея из мини‑приложения</b>\n\n"
+            if not user_id:
+                return _json_response(
+                    {
+                        "success": False,
+                        "error": "user_required",
+                        "message": "Не удалось определить пользователя. Откройте мини‑приложение из Telegram и попробуйте ещё раз.",
+                    },
+                    status=400,
+                )
+
+            # Лимит: не чаще 1 раза в 12 часов на одного пользователя
+            try:
+                limits = _read_json_file(IDEAS_LIMITS_FILE) or {}
+                if not isinstance(limits, dict):
+                    limits = {}
+            except Exception as e:
+                logger.warning("Failed to read ideas limits file: %s", e)
+                limits = {}
+
+            now_ts = time.time()
+            last_ts = float(limits.get(user_id, 0) or 0)
+            cooldown = 12 * 60 * 60  # 12 часов
+            if last_ts and now_ts - last_ts < cooldown:
+                remaining = int(cooldown - (now_ts - last_ts))
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                if hours > 0:
+                    remain_text = f"{hours} ч"
+                    if minutes > 0:
+                        remain_text += f" {minutes} мин"
+                else:
+                    remain_text = f"{minutes} мин"
+                return _json_response(
+                    {
+                        "success": False,
+                        "error": "cooldown",
+                        "message": f"Вы уже отправляли идею. Новую можно будет отправить через {remain_text}.",
+                        "retry_after_seconds": remaining,
+                    },
+                    status=429,
+                )
+
+            header = "💡 <b>Новая идея</b>\n\n"
             user_line = ""
             if username:
                 user_line = f"От: @{username}"
@@ -1946,14 +2008,19 @@ def setup_http_server():
             if not user_line:
                 user_line = "От: неизвестный пользователь"
 
-            source_line = f"\nИсточник: <code>{source}</code>"
             idea_block = f"\n\nТекст идеи:\n<code>{text}</code>"
 
-            full_text = header + user_line + source_line + idea_block
+            full_text = header + user_line + idea_block
 
             if IDEAS_CHAT_ID:
                 try:
                     await bot.send_message(IDEAS_CHAT_ID, full_text, parse_mode="HTML", disable_web_page_preview=True)
+                    # сохраняем время последней успешно отправленной идеи
+                    try:
+                        limits[user_id] = now_ts
+                        _save_json_file(IDEAS_LIMITS_FILE, limits)
+                    except Exception as se:
+                        logger.warning("Failed to update ideas limits file: %s", se)
                 except Exception as e:
                     logger.warning(f"Failed to send idea to IDEAS_CHAT_ID={IDEAS_CHAT_ID}: {e}")
                     return _json_response({"success": False, "error": "send_failed", "message": "Не удалось отправить идею. Попробуйте позже."}, status=502)
