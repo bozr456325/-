@@ -60,6 +60,7 @@ async def _ensure_schema():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        logger.info("PostgreSQL: ensured table 'users'")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS purchases (
                 id SERIAL PRIMARY KEY,
@@ -71,8 +72,10 @@ async def _ensure_schema():
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        logger.info("PostgreSQL: ensured table 'purchases'")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_purchases_created ON purchases(created_at)")
+        logger.info("PostgreSQL: ensured indexes idx_purchases_user, idx_purchases_created")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS referrals (
                 user_id TEXT PRIMARY KEY,
@@ -89,6 +92,7 @@ async def _ensure_schema():
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        logger.info("PostgreSQL: ensured table 'referrals'")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS rating_prefs (
                 user_id TEXT PRIMARY KEY,
@@ -96,7 +100,8 @@ async def _ensure_schema():
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
-    logger.info("Схема PostgreSQL проверена")
+        logger.info("PostgreSQL: ensured table 'rating_prefs'")
+    logger.info("Схема PostgreSQL проверена (users, purchases, referrals, rating_prefs)")
 
 
 # --- Referrals ---
