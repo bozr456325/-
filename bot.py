@@ -3276,7 +3276,20 @@ def setup_http_server():
 
     # Создание заказа Fragment: при наличии TON-кошелька — только валидация (оплата CryptoBot → deliver-stars). Иначе — ссылка на оплату TON.
     async def fragment_create_star_order_handler(request):
-        """Создать заказ на звёзды: возвращает order_id и payment_url (если API отдаёт), фронт открывает ссылку оплаты TonKeeper"""
+        """
+        Создать заказ на звёзды: возвращает order_id и payment_url (если API отдаёт), фронт открывает ссылку оплаты TonKeeper.
+        ВАЖНО: для работы мини‑приложения используется метод POST. Для GET просто возвращаем информацию,
+        чтобы при открытии URL в браузере не было ошибки Method Not Allowed.
+        """
+        if request.method != "POST":
+            # Чтобы не пугать 405, просто отвечаем, какой метод поддерживается.
+            return _json_response(
+                {
+                    "ok": True,
+                    "method": request.method,
+                    "message": "Используйте POST с JSON из мини‑приложения для создания заказа звёзд."
+                }
+            )
         try:
             body = await request.json()
         except Exception:
@@ -3298,7 +3311,7 @@ def setup_http_server():
             }, status=503)
         try:
             # ВСЕГДА используем режим fragment.com site: создаём заказ на стороне Fragment
-            # и отдаём TonKeeper-ссылку. Fragment сам доставляет звёзды после оплаты.
+            # и отдаём TonKeeper‑ссылку. Fragment сам доставляет звёзды после оплаты.
             res = await _fragment_site_create_star_order(request.app, recipient=recipient, stars_amount=stars_amount)
             return _json_response({
                 "success": True,
@@ -3323,7 +3336,8 @@ def setup_http_server():
             status=501,
         )
 
-    app.router.add_post("/api/fragment/create-star-order", fragment_create_star_order_handler)
+    # Принимаем ЛЮБЫЕ методы, чтобы не было "Method Not Allowed" при открытии URL в браузере.
+    app.router.add_route("*", "/api/fragment/create-star-order", fragment_create_star_order_handler)
     app.router.add_route("OPTIONS", "/api/fragment/create-star-order", lambda r: Response(status=204, headers=_cors_headers()))
     app.router.add_post("/api/fragment/create-premium-order", fragment_create_premium_order_handler)
     app.router.add_route("OPTIONS", "/api/fragment/create-premium-order", lambda r: Response(status=204, headers=_cors_headers()))
