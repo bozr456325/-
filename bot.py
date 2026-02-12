@@ -4058,21 +4058,24 @@ def setup_http_server():
                             "Set STEAM_NOTIFY_CHAT_ID in Railway (e.g. your Telegram chat ID). Text:\n%s",
                             notify_text,
                         )
-
-                        # Начисление рефералов
-                        try:
-                            await _apply_referral_earnings_for_purchase(
-                                user_id=user_id,
-                                amount_rub=amount_rub,
-                                username=purchase.get("username") or "",
-                                first_name=purchase.get("first_name") or "",
-                            )
-                        except Exception as ref_err:
-                            logger.warning(f"Failed to update referral earnings (webhook steam): {ref_err}")
-                        
-                        logger.info(f"CryptoBot webhook: steam purchase recorded, invoice_id={invoice_id}, user_id={user_id}, amount_rub={amount_rub}")
-                    except Exception as record_err:
-                        logger.exception(f"CryptoBot webhook: error recording steam purchase for invoice_id={invoice_id}: {record_err}")
+                    
+                    # Начисление рефералов за покупку Steam (без влияния на рейтинг)
+                    try:
+                        await _apply_referral_earnings_for_purchase(
+                            user_id=user_id,
+                            amount_rub=amount_rub,
+                            username=purchase.get("username") or "",
+                            first_name=purchase.get("first_name") or "",
+                        )
+                    except Exception as ref_err:
+                        logger.warning(f"Failed to update referral earnings (webhook steam): {ref_err}")
+                    
+                    logger.info(
+                        "CryptoBot webhook: steam purchase processed and referral updated, invoice_id=%s, user_id=%s, amount_rub=%s",
+                        invoice_id,
+                        user_id,
+                        amount_rub,
+                    )
             
             return _json_response({"ok": True, "message": "processed"})
             
