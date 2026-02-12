@@ -3967,7 +3967,10 @@ def setup_http_server():
     async def health_handler(request):
         return _json_response({"status": "ok"})
 
+    # Обычный healthcheck по относительному пути
     app.router.add_get("/api/health", health_handler)
+    # На случай, если Railway по ошибке стучится с полным URL в path
+    app.router.add_get("/https://jet-store-bot-production.up.railway.app/api/health", health_handler)
     
     # Рейтинг покупателей
     RATING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rating_data.json")
