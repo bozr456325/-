@@ -3661,6 +3661,11 @@ def setup_http_server():
         CryptoBot отправляет POST запросы с данными об изменении статуса инвойса.
         Формат: { "update_id": int, "update_type": "invoice_paid", "request": { "invoice_id": int, ... } }
         """
+        # CryptoBot может делать тестовые запросы разными методами.
+        # Для всего, что не POST, просто отвечаем 200 OK, чтобы не было "Method Not Allowed".
+        if request.method != "POST":
+            return _json_response({"ok": True, "method": request.method})
+
         if not CRYPTO_PAY_TOKEN:
             return _json_response({"error": "not_configured"}, status=503)
 
@@ -3955,8 +3960,8 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/cryptobot/create-invoice", lambda r: Response(status=204, headers=_cors_headers()))
     app.router.add_post("/api/cryptobot/check-invoice", cryptobot_check_invoice_handler)
     app.router.add_route("OPTIONS", "/api/cryptobot/check-invoice", lambda r: Response(status=204, headers=_cors_headers()))
-    app.router.add_post("/api/cryptobot/webhook", cryptobot_webhook_handler)
-    app.router.add_route("OPTIONS", "/api/cryptobot/webhook", lambda r: Response(status=204, headers=_cors_headers()))
+    # Webhook CryptoBot: принимаем ЛЮБОЙ метод, чтобы не ловить 405 от тестов
+    app.router.add_route("*", "/api/cryptobot/webhook", cryptobot_webhook_handler)
     
     # Рейтинг покупателей
     RATING_DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rating_data.json")
