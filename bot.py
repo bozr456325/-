@@ -3337,8 +3337,8 @@ def setup_http_server():
         )
 
     # Принимаем ЛЮБЫЕ методы, чтобы не было "Method Not Allowed" при открытии URL в браузере.
+    # ВАЖНО: не регистрируем отдельный OPTIONS, потому что "*" уже включает все методы.
     app.router.add_route("*", "/api/fragment/create-star-order", fragment_create_star_order_handler)
-    app.router.add_route("OPTIONS", "/api/fragment/create-star-order", lambda r: Response(status=204, headers=_cors_headers()))
     app.router.add_post("/api/fragment/create-premium-order", fragment_create_premium_order_handler)
     app.router.add_route("OPTIONS", "/api/fragment/create-premium-order", lambda r: Response(status=204, headers=_cors_headers()))
 
