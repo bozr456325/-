@@ -6,6 +6,8 @@ import re
 import base64
 import time
 import uuid
+import hmac
+import hashlib
 from io import BytesIO
 from datetime import datetime, timedelta
 from typing import Optional, Union
@@ -3434,9 +3436,10 @@ def setup_http_server():
                 except (TypeError, ValueError):
                     amount_steam = 0.0
                 login = (purchase.get("login") or "").strip()
-                if amount_steam <= 0:
+                # Минимальная сумма пополнения Steam — 50 ₽ на кошелёк
+                if amount_steam < 50:
                     return _json_response(
-                        {"error": "bad_request", "message": "Неверная сумма пополнения Steam"}, status=400
+                        {"error": "bad_request", "message": "Минимальная сумма пополнения Steam — 50 ₽"}, status=400
                     )
                 amount_rub = round(amount_steam * _get_steam_rate_rub(), 2)
                 if amount_rub <= 0:
@@ -3627,9 +3630,29 @@ def setup_http_server():
         """
         if not CRYPTO_PAY_TOKEN:
             return _json_response({"error": "not_configured"}, status=503)
-        
+
+        # Дополнительная защита: проверяем подпись CryptoBot (если заголовок присутствует).
+        # Согласно документации Crypto Pay, подпись считается как HMAC-SHA256 от "сырых" данных запроса,
+        # используя CRYPTO_PAY_TOKEN в качестве секрета, и передаётся в заголовке Crypto-Pay-Signature.
         try:
-            body = await request.json()
+            raw_body = await request.read()
+        except Exception:
+            raw_body = b""
+
+        signature = request.headers.get("Crypto-Pay-Signature") or request.headers.get("crypto-pay-signature")
+        if signature and raw_body:
+            try:
+                mac = hmac.new(CRYPTO_PAY_TOKEN.encode("utf-8"), msg=raw_body, digestmod=hashlib.sha256)
+                expected = mac.hexdigest()
+                if not hmac.compare_digest(expected, str(signature).strip()):
+                    logger.warning("CryptoBot webhook: invalid signature, invoice ignored")
+                    return _json_response({"error": "forbidden", "message": "Invalid signature"}, status=403)
+            except Exception as sig_err:
+                logger.warning(f"CryptoBot webhook: signature check error: {sig_err}")
+
+        # После проверки подписи парсим JSON
+        try:
+            body = json.loads(raw_body.decode("utf-8")) if raw_body else await request.json()
         except Exception:
             return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
         
