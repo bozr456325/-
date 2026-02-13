@@ -190,6 +190,36 @@ def _save_json_file(path: str, data: dict) -> None:
         logger.warning(f"Не удалось сохранить JSON {path}: {e}")
 
 
+# Глобальный помощник: поиск заказа по нашему кастомному order_id (#ABC123)
+_CRYPTOBOT_ORDERS_FILE_GLOBAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cryptobot_orders.json")
+
+
+async def _find_order_by_custom_id(order_id: str) -> Optional[tuple]:
+    """
+    Ищет заказ CryptoBot по нашему кастомному order_id (#ABC123)
+    в файле cryptobot_orders.json.
+    Возвращает (invoice_id, meta) или None.
+    """
+    oid = (order_id or "").strip().upper()
+    if not oid:
+        return None
+    if not oid.startswith("#"):
+        oid = "#" + oid
+    try:
+        data = _read_json_file(_CRYPTOBOT_ORDERS_FILE_GLOBAL) or {}
+        if not isinstance(data, dict):
+            return None
+        for inv_id, meta in data.items():
+            if not isinstance(meta, dict):
+                continue
+            purchase_meta = meta.get("purchase") or {}
+            if str(purchase_meta.get("order_id") or "").upper() == oid:
+                return (inv_id, meta)
+    except Exception as e:
+        logger.warning(f"_find_order_by_custom_id error: {e}")
+    return None
+
+
 def _load_referrals_sync() -> None:
     """Синхронная загрузка рефералов из JSON (fallback)."""
     global REFERRALS
