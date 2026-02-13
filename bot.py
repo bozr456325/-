@@ -763,6 +763,7 @@ class AdminStates(StatesGroup):
     waiting_notification_text = State()
     waiting_notification_photo = State()
     waiting_user_balance = State()
+    waiting_order_id = State()
 
 
 class SellStarsStates(StatesGroup):
@@ -820,22 +821,12 @@ def get_admin_menu():
         [
             InlineKeyboardButton(text="admin", web_app=WebAppInfo(url=ADM_WEB_APP_URL)),
         ],
-
         [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-            InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")
-        ],
-        [
-            InlineKeyboardButton(text="✏️ Приветствие", callback_data="admin_welcome"),
+            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_notification"),
             InlineKeyboardButton(text="🖼️ Изменить фото", callback_data="admin_photo")
         ],
         [
-            InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_notification"),
-            InlineKeyboardButton(text="ℹ️ О нас", callback_data="admin_about")
-        ],
-        [
-            InlineKeyboardButton(text="👑 Админы", callback_data="admin_admins"),
-            InlineKeyboardButton(text="💰 Балансы", callback_data="admin_balance")
+            InlineKeyboardButton(text="🔍 Поиск заказа", callback_data="admin_search_order"),
         ],
         [
             InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_main")
@@ -1392,6 +1383,105 @@ async def send_notification(callback_query: types.CallbackQuery, state: FSMConte
     await state.set_state(AdminStates.waiting_notification_text)
     await callback_query.answer()
 
+
+@dp.callback_query(F.data == "admin_search_order")
+async def admin_search_order(callback_query: types.CallbackQuery, state: FSMContext):
+    """Запросить у админа ID заказа для поиска"""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("⛔ Нет прав администратора", show_alert=True)
+        return
+    
+    await callback_query.message.answer(
+        "🔍 <b>Поиск заказа</b>\n\n"
+        "Отправьте ID заказа в формате <code>#ABC123</code>.\n"
+        "ID можно скопировать из истории покупок в мини‑приложении.",
+        parse_mode="HTML"
+    )
+    await state.set_state(AdminStates.waiting_order_id)
+    await callback_query.answer()
+
+
+@dp.message(AdminStates.waiting_order_id)
+async def process_admin_order_search(message: types.Message, state: FSMContext):
+    """Обработать введённый ID заказа и показать информацию по нему"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Нет прав администратора")
+        await state.clear()
+        return
+    
+    raw_id = (message.text or "").strip().upper()
+    if not raw_id:
+        await message.answer("⚠️ Отправьте ID заказа в формате <code>#ABC123</code>.", parse_mode="HTML")
+        return
+    
+    if not raw_id.startswith("#"):
+        raw_id = "#" + raw_id
+    
+    # Ищем заказ в локальном хранилище CryptoBot заказов
+    found = await _find_order_by_custom_id(raw_id)
+    if not found:
+        await message.answer(f"❌ Заказ с ID <code>{raw_id}</code> не найден.", parse_mode="HTML")
+        await state.clear()
+        return
+    
+    invoice_id, meta = found
+    meta = meta or {}
+    purchase = meta.get("purchase") or {}
+    amount_rub = meta.get("amount_rub") or 0
+    user_id = meta.get("user_id") or "unknown"
+    context = meta.get("context") or "purchase"
+    delivered = bool(meta.get("delivered"))
+    
+    ptype = (purchase.get("type") or "").strip().lower()
+    username = purchase.get("username") or ""
+    first_name = purchase.get("first_name") or ""
+    stars_amount = int(purchase.get("stars_amount") or 0)
+    months = int(purchase.get("months") or 0)
+    login = purchase.get("login") or ""
+    created_ts = meta.get("created_at")
+    created_str = ""
+    if isinstance(created_ts, (int, float)):
+        try:
+            created_str = datetime.fromtimestamp(created_ts).strftime("%d.%m.%Y %H:%M:%S")
+        except Exception:
+            created_str = ""
+    
+    # Описание товара
+    if ptype == "stars":
+        product_desc = f"Звёзды Telegram — {stars_amount} шт."
+    elif ptype == "premium":
+        product_desc = f"Telegram Premium — {months} мес."
+    elif ptype == "steam":
+        product_desc = f"Пополнение Steam для аккаунта: <code>{login or '—'}</code>"
+    else:
+        product_desc = purchase.get("productName") or purchase.get("product_name") or "Неизвестный товар"
+    
+    status_lines = []
+    if delivered:
+        status_lines.append("✅ <b>Товар выдан</b>")
+    else:
+        status_lines.append("⏳ <b>Оплата подтверждена, выдача ещё не завершена</b>")
+    status_lines.append(f"💵 Сумма: <b>{float(amount_rub or 0):.2f} ₽</b>")
+    
+    text_lines = [
+        f"🔎 <b>Информация по заказу {raw_id}</b>",
+        "",
+        f"🧾 <b>Invoice ID:</b> <code>{invoice_id}</code>",
+        f"📦 <b>Тип:</b> {ptype or '—'}",
+        f"📚 <b>Товар:</b> {product_desc}",
+        "",
+        f"👤 <b>Пользователь ID:</b> <code>{user_id}</code>",
+        f"👤 <b>Имя:</b> {first_name or '—'}",
+        f"🔗 <b>Username:</b> @{username}" if username else "🔗 <b>Username:</b> —",
+    ]
+    if created_str:
+        text_lines.append(f"🕒 <b>Создан:</b> {created_str}")
+    text_lines.append("")
+    text_lines.extend(status_lines)
+    
+    await message.answer("\n".join(text_lines), parse_mode="HTML")
+    await state.clear()
+
 @dp.message(AdminStates.waiting_notification_text)
 async def process_notification_text(message: types.Message, state: FSMContext):
     """Обработать текст уведомления"""
@@ -1893,8 +1983,33 @@ def setup_http_server():
                 "domain": "jetstoreapp.ru",
                 "cryptobot_usdt_amount": CRYPTOBOT_USDT_AMOUNT,
             })
-
+    
     app.router.add_get('/api/config', api_config_handler)
+
+    # Поиск заказа по пользовательскому ID вида #ABC123
+    async def _find_order_by_custom_id(order_id: str) -> tuple | None:
+        """
+        Ищет заказ CryptoBot по нашему кастомному order_id (#ABC123)
+        в файле cryptobot_orders.json (CRYPTOBOT_ORDERS_FILE).
+        """
+        oid = (order_id or "").strip().upper()
+        if not oid:
+            return None
+        if not oid.startswith("#"):
+            oid = "#" + oid
+        try:
+            data = _read_json_file(CRYPTOBOT_ORDERS_FILE) or {}
+            if not isinstance(data, dict):
+                return None
+            for inv_id, meta in data.items():
+                if not isinstance(meta, dict):
+                    continue
+                purchase_meta = meta.get("purchase") or {}
+                if str(purchase_meta.get("order_id") or "").upper() == oid:
+                    return (inv_id, meta)
+        except Exception as e:
+            logger.warning(f"_find_order_by_custom_id error: {e}")
+        return None
 
     async def idea_submit_handler(request):
         """
