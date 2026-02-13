@@ -1979,6 +1979,34 @@ def setup_http_server():
     app["ton_verified_event_ids"] = set()
     # CryptoBot: invoice_id -> meta (context, user_id, purchase, amount_rub, created_at, delivered)
     app["cryptobot_orders"] = {}
+    # Platega.io: transaction_id (UUID) -> meta (context, user_id, purchase, amount_rub, order_id, created_at, delivered)
+    PLATEGA_ORDERS_FILE = os.path.join(_script_dir, "platega_orders.json")
+
+    def _load_platega_order_from_file(transaction_id: str) -> Optional[dict]:
+        try:
+            data = _read_json_file(PLATEGA_ORDERS_FILE) or {}
+            return data.get(str(transaction_id)) if isinstance(data, dict) else None
+        except Exception as e:
+            logger.warning("Failed to load platega order from file: %s", e)
+            return None
+
+    def _save_platega_order_to_file(transaction_id: str, order_meta: dict):
+        try:
+            data = _read_json_file(PLATEGA_ORDERS_FILE) or {}
+            if not isinstance(data, dict):
+                data = {}
+            data[str(transaction_id)] = order_meta
+            with open(PLATEGA_ORDERS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("Failed to save platega order to file: %s", e)
+
+    try:
+        _platega_data = _read_json_file(PLATEGA_ORDERS_FILE) or {}
+        app["platega_orders"] = _platega_data if isinstance(_platega_data, dict) else {}
+    except Exception:
+        app["platega_orders"] = {}
+
     # Preflight для CORS
     app.router.add_route('OPTIONS', '/api/telegram/user', lambda r: Response(status=204, headers={
         'Access-Control-Allow-Origin': '*',
@@ -2854,6 +2882,11 @@ def setup_http_server():
     CRYPTO_PAY_TOKEN = _get_env_clean("CRYPTO_PAY_TOKEN") or _cryptobot_cfg_early.get("api_token", "")
     CRYPTO_PAY_BASE = os.getenv("CRYPTO_PAY_BASE", "https://pay.crypt.bot/api").rstrip("/")
 
+    # Platega.io — оплата картами и СБП (https://docs.platega.io/)
+    PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "").strip()
+    PLATEGA_SECRET = os.getenv("PLATEGA_SECRET", "").strip()
+    PLATEGA_BASE_URL = (os.getenv("PLATEGA_BASE_URL", "https://app.platega.io") or "https://app.platega.io").rstrip("/")
+
     # Fragment.com (сайт) — вызов fragment.com/api через cookies + hash (как в ezstar).
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _fragment_site_cfg = _read_json_file(os.path.join(_script_dir, "fragment_site_config.json"))
@@ -3152,6 +3185,155 @@ def setup_http_server():
             is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
             order_id = (body.get("order_id") or body.get("orderId") or "").strip()
             transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
+
+        # Platega (карты / СБП): проверка по transaction_id
+        if method == "platega":
+            platega_tid = (body.get("transaction_id") or body.get("transactionId") or "").strip()
+            if not platega_tid:
+                return _json_response({"paid": False})
+            order_meta = None
+            try:
+                orders = request.app.get("platega_orders")
+                if isinstance(orders, dict):
+                    order_meta = orders.get(platega_tid)
+                if not order_meta:
+                    order_meta = _load_platega_order_from_file(platega_tid)
+                    if order_meta and isinstance(orders, dict):
+                        orders[platega_tid] = order_meta
+            except Exception as meta_err:
+                logger.warning("platega order meta read failed for %s: %s", platega_tid, meta_err)
+            if not order_meta:
+                return _json_response({"paid": False})
+            if order_meta.get("delivered"):
+                return _json_response({"paid": True, "transaction_id": platega_tid})
+            if not PLATEGA_MERCHANT_ID or not PLATEGA_SECRET:
+                return _json_response({"paid": False})
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{PLATEGA_BASE_URL}/transaction/{platega_tid}",
+                        headers={"X-MerchantId": PLATEGA_MERCHANT_ID, "X-Secret": PLATEGA_SECRET},
+                    ) as resp:
+                        if resp.status != 200:
+                            return _json_response({"paid": False})
+                        data = await resp.json(content_type=None) if resp.content_type else {}
+                status = (data.get("status") or "").strip().upper()
+                if status != "CONFIRMED":
+                    return _json_response({"paid": False, "transaction_id": platega_tid})
+                # Выдача товара (аналогично CryptoBot fallback в payment_check)
+                purchase_meta = order_meta.get("purchase") or {}
+                ptype = (purchase_meta.get("type") or "").strip().lower()
+                user_id = str(order_meta.get("user_id") or "unknown")
+                try:
+                    amount_rub = float(order_meta.get("amount_rub") or 0.0)
+                except (TypeError, ValueError):
+                    amount_rub = 0.0
+                if ptype == "steam":
+                    account = (purchase_meta.get("login") or "").strip()
+                    amount_steam = purchase_meta.get("amount_steam") or purchase_meta.get("amount") or amount_rub
+                    try:
+                        amount_steam = float(amount_steam)
+                    except (TypeError, ValueError):
+                        amount_steam = amount_rub
+                    steam_notify_chat_id = int(os.getenv("STEAM_NOTIFY_CHAT_ID", "0") or "0")
+                    notify_lines = [
+                        "💻 Новый заказ пополнения Steam (Platega)",
+                        "",
+                        f"👤 Аккаунт Steam: <code>{account or '—'}</code>",
+                        f"💰 Сумма на кошелёк Steam: <b>{amount_steam:.0f} ₽</b>",
+                        f"💵 Оплачено: <b>{amount_rub:.2f} ₽</b>",
+                        f"🧾 Platega transaction_id: <code>{platega_tid}</code>",
+                    ]
+                    funpay_url = os.getenv("FUNPAY_STEAM_URL", "").strip()
+                    if funpay_url:
+                        notify_lines.append("")
+                        notify_lines.append(f"🛒 Лот / профиль FunPay: {funpay_url}")
+                    notify_text = "\n".join(notify_lines)
+                    if steam_notify_chat_id:
+                        try:
+                            await bot.send_message(
+                                chat_id=steam_notify_chat_id,
+                                text=notify_text,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                            try:
+                                await _apply_referral_earnings_for_purchase(
+                                    user_id=user_id,
+                                    amount_rub=amount_rub,
+                                    username=purchase_meta.get("username") or "",
+                                    first_name=purchase_meta.get("first_name") or "",
+                                )
+                            except Exception as ref_err:
+                                logger.warning("Platega payment_check: referral error: %s", ref_err)
+                        except Exception as send_err:
+                            logger.warning("Platega Steam notify failed: %s", send_err)
+                    order_meta["delivered"] = True
+                    try:
+                        po = request.app.get("platega_orders")
+                        if isinstance(po, dict):
+                            po[platega_tid] = order_meta
+                    except Exception:
+                        pass
+                    _save_platega_order_to_file(platega_tid, order_meta)
+                elif ptype == "stars":
+                    recipient = (purchase_meta.get("login") or "").strip().lstrip("@")
+                    stars_amount = int(purchase_meta.get("stars_amount") or 0)
+                    if recipient and stars_amount >= 50 and TON_WALLET_ENABLED:
+                        try:
+                            _, recipient_address = await _fragment_get_recipient_address(recipient)
+                            req_id = await _fragment_init_buy(recipient_address, stars_amount)
+                            tx_address, amount_nanoton, payload_b64 = await _fragment_get_buy_link(req_id)
+                            payload_decoded = _fragment_encoded(payload_b64)
+                            tx_hash, send_err = await _ton_wallet_send_safe(tx_address, amount_nanoton, payload_decoded)
+                            if tx_hash:
+                                order_meta["delivered"] = True
+                                try:
+                                    po = request.app.get("platega_orders")
+                                    if isinstance(po, dict):
+                                        po[platega_tid] = order_meta
+                                except Exception:
+                                    pass
+                                _save_platega_order_to_file(platega_tid, order_meta)
+                                try:
+                                    import db as _db
+                                    order_id_custom = str(purchase_meta.get("order_id") or "").strip() or None
+                                    if _db.is_enabled():
+                                        await _db.user_upsert(user_id, purchase_meta.get("username") or "", purchase_meta.get("first_name") or "")
+                                        await _db.purchase_add(user_id, amount_rub, stars_amount, "stars", f"{stars_amount} звёзд", order_id_custom)
+                                    await _apply_referral_earnings_for_purchase(
+                                        user_id=user_id,
+                                        amount_rub=amount_rub,
+                                        username=purchase_meta.get("username") or "",
+                                        first_name=purchase_meta.get("first_name") or "",
+                                    )
+                                except Exception as record_err:
+                                    logger.warning("Platega payment_check stars record: %s", record_err)
+                                return _json_response({"paid": True, "transaction_id": platega_tid})
+                        except Exception as e:
+                            logger.exception("Platega payment_check stars delivery: %s", e)
+                elif ptype == "premium":
+                    try:
+                        await _apply_referral_earnings_for_purchase(
+                            user_id=user_id,
+                            amount_rub=amount_rub,
+                            username=purchase_meta.get("username") or "",
+                            first_name=purchase_meta.get("first_name") or "",
+                        )
+                    except Exception as ref_err:
+                        logger.warning("Platega payment_check referral: %s", ref_err)
+                    order_meta["delivered"] = True
+                    try:
+                        po = request.app.get("platega_orders")
+                        if isinstance(po, dict):
+                            po[platega_tid] = order_meta
+                    except Exception:
+                        pass
+                    _save_platega_order_to_file(platega_tid, order_meta)
+                return _json_response({"paid": True, "transaction_id": platega_tid})
+            except Exception as e:
+                logger.warning("Platega GET transaction status failed for %s: %s", platega_tid, e)
+                return _json_response({"paid": False})
         
         # Fragment.com (site): пробуем проверить статус по order_id (req_id)
         # Важно: пытаемся проверять даже если сервер перезапускался и meta не сохранилось.
@@ -3209,6 +3391,42 @@ def setup_http_server():
                 except Exception as e:
                     logger.warning(f"TON payment check failed for order_id={order_id}: {e}")
             return _json_response({"paid": False, "order_id": order_id})
+        # Platega: проверка по transaction_id (поллинг с фронта или после редиректа)
+        if method == "platega" and transaction_id and PLATEGA_MERCHANT_ID and PLATEGA_SECRET:
+            orders_pl = request.app.get("platega_orders") or {}
+            if not isinstance(orders_pl, dict):
+                orders_pl = {}
+            order_meta = orders_pl.get(str(transaction_id))
+            if not order_meta:
+                order_meta = _load_platega_order_from_file(str(transaction_id))
+                if order_meta and isinstance(orders_pl, dict):
+                    orders_pl[str(transaction_id)] = order_meta
+            if order_meta and order_meta.get("delivered"):
+                return _json_response({"paid": True, "transaction_id": transaction_id})
+            # Опционально: уточняем статус у Platega
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{PLATEGA_BASE_URL}/transaction/{transaction_id}",
+                        headers={"X-MerchantId": PLATEGA_MERCHANT_ID, "X-Secret": PLATEGA_SECRET},
+                    ) as resp:
+                        if resp.status == 200:
+                            pdata = await resp.json(content_type=None) if resp.content_type else {}
+                            if str(pdata.get("status")).upper() == "CONFIRMED":
+                                if not order_meta:
+                                    order_meta = _load_platega_order_from_file(str(transaction_id))
+                                    if order_meta:
+                                        orders_pl[str(transaction_id)] = order_meta
+                                if order_meta and not order_meta.get("delivered"):
+                                    # Выдача товара (то же, что в callback)
+                                    await _deliver_platega_order(
+                                        request.app, order_meta, str(transaction_id),
+                                        _save_platega_order_to_file, bot,
+                                    )
+                                return _json_response({"paid": True, "transaction_id": transaction_id})
+            except Exception as e:
+                logger.warning("Platega getTransaction status check failed for %s: %s", transaction_id, e)
+            return _json_response({"paid": False, "transaction_id": transaction_id})
         # CryptoBot: проверка по invoice_id (единственный обязательный параметр)
         if method == "cryptobot" and invoice_id and CRYPTO_PAY_TOKEN:
             try:
@@ -4241,6 +4459,258 @@ def setup_http_server():
             invoice_id_str = str(invoice_id) if invoice_id else "unknown"
             logger.exception(f"CryptoBot webhook error for invoice_id={invoice_id_str}: {e}")
             return _json_response({"error": "internal_error", "message": str(e)}, status=500)
+
+    # Platega.io: создание транзакции (карты / СБП)
+    async def platega_create_transaction_handler(request):
+        """POST /api/platega/create-transaction — создаёт транзакцию в Platega, возвращает redirect URL."""
+        if not PLATEGA_MERCHANT_ID or not PLATEGA_SECRET:
+            return _json_response(
+                {"error": "not_configured", "message": "PLATEGA_MERCHANT_ID и PLATEGA_SECRET не заданы."},
+                status=503,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
+        context = (body.get("context") or "").strip() or "purchase"
+        user_id = str(body.get("user_id") or body.get("userId") or "").strip() or "unknown"
+        purchase = body.get("purchase") or {}
+        if context != "purchase":
+            return _json_response({"error": "bad_request", "message": "Только context=purchase поддерживается"}, status=400)
+        ptype = (purchase.get("type") or "").strip()
+        amount = 0.0
+        description = ""
+        if ptype == "stars":
+            try:
+                stars_amount = int(purchase.get("stars_amount") or purchase.get("starsAmount") or 0)
+            except (TypeError, ValueError):
+                stars_amount = 0
+            login = (purchase.get("login") or "").strip().lstrip("@")
+            if stars_amount < 50 or stars_amount > 1_000_000 or not login:
+                return _json_response({"error": "bad_request", "message": "Звёзды: 50..1000000 и получатель обязательны"}, status=400)
+            amount = round(stars_amount * STAR_PRICE_RUB, 2)
+            if amount < 1:
+                amount = 1.0
+            description = f"Звёзды Telegram — {stars_amount} шт. для @{login}"
+        elif ptype == "premium":
+            months = int(purchase.get("months") or 0)
+            if months not in PREMIUM_PRICES_RUB:
+                return _json_response({"error": "bad_request", "message": "Неверная длительность Premium"}, status=400)
+            amount = float(PREMIUM_PRICES_RUB[months])
+            description = f"Telegram Premium — {months} мес."
+        elif ptype == "steam":
+            try:
+                amount_steam = float(purchase.get("amount_steam") or purchase.get("amount") or 0)
+            except (TypeError, ValueError):
+                amount_steam = 0.0
+            login = (purchase.get("login") or "").strip()
+            if amount_steam < 50 or not login:
+                return _json_response({"error": "bad_request", "message": "Steam: минимум 50 ₽ и логин обязательны"}, status=400)
+            amount_rub = round(amount_steam * _get_steam_rate_rub(), 2)
+            if amount_rub <= 0 or amount_rub > 1_000_000:
+                return _json_response({"error": "bad_request", "message": "Неверная сумма Steam"}, status=400)
+            amount = float(amount_rub)
+            description = f"Пополнение Steam для {login} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
+        else:
+            return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium и Steam"}, status=400)
+        payment_method_int = int(body.get("platega_method") or body.get("payment_method") or 10)
+        if payment_method_int not in (2, 10):
+            payment_method_int = 10
+        base_url = (WEB_APP_URL or "https://jetstoreapp.ru").rstrip("/")
+        return_url = body.get("return_url") or f"{base_url}?platega=success"
+        failed_url = body.get("failed_url") or f"{base_url}?platega=fail"
+        payload_str = json.dumps({"order_id": purchase.get("order_id"), "user_id": user_id}, ensure_ascii=False)[:2048]
+        platega_body = {
+            "paymentMethod": payment_method_int,
+            "paymentDetails": {"amount": amount, "currency": "RUB"},
+            "description": description[:1024],
+            "return": return_url,
+            "failedUrl": failed_url,
+            "payload": payload_str,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-MerchantId": PLATEGA_MERCHANT_ID,
+            "X-Secret": PLATEGA_SECRET,
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{PLATEGA_BASE_URL}/transaction/process",
+                    headers=headers,
+                    json=platega_body,
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text) if text else {}
+                    except json.JSONDecodeError:
+                        return _json_response({"error": "platega_error", "message": f"Ответ не JSON: {text[:200]}"}, status=502)
+                    if resp.status != 200:
+                        err = data.get("error") or data.get("message") or text[:200]
+                        return _json_response({"error": "platega_error", "message": str(err)}, status=502)
+                    transaction_id = data.get("transactionId") or data.get("transaction_id")
+                    redirect_url = data.get("redirect") or data.get("payment_url") or ""
+                    if not transaction_id or not redirect_url:
+                        return _json_response({"error": "platega_error", "message": "Нет transactionId или redirect в ответе"}, status=502)
+                    order_meta = {
+                        "context": context,
+                        "user_id": user_id,
+                        "amount_rub": float(amount),
+                        "purchase": dict(purchase),
+                        "order_id": purchase.get("order_id"),
+                        "created_at": time.time(),
+                        "delivered": False,
+                    }
+                    try:
+                        po = request.app.get("platega_orders")
+                        if isinstance(po, dict):
+                            po[str(transaction_id)] = order_meta
+                    except Exception:
+                        pass
+                    _save_platega_order_to_file(str(transaction_id), order_meta)
+                    logger.info("Platega transaction created: transaction_id=%s, amount=%s", transaction_id, amount)
+                    return _json_response({
+                        "success": True,
+                        "transaction_id": transaction_id,
+                        "redirect": redirect_url,
+                    })
+        except aiohttp.ClientError as e:
+            logger.error("Platega create transaction network error: %s", e)
+            return _json_response({"error": "network_error", "message": str(e)}, status=502)
+        except Exception as e:
+            logger.exception("Platega create transaction error: %s", e)
+            return _json_response({"error": "internal_error", "message": str(e)}, status=500)
+
+    # Platega.io: callback при изменении статуса транзакции
+    async def platega_callback_handler(request):
+        """POST от Platega при смене статуса. Проверяем X-MerchantId, X-Secret; при CONFIRMED — выдача товара."""
+        if request.method != "POST":
+            return web.Response(status=200, text="OK")
+        merchant_id = request.headers.get("X-MerchantId") or request.headers.get("x-merchantid")
+        secret = request.headers.get("X-Secret") or request.headers.get("x-secret")
+        if not merchant_id or not secret or merchant_id != PLATEGA_MERCHANT_ID or secret != PLATEGA_SECRET:
+            logger.warning("Platega callback: invalid or missing X-MerchantId / X-Secret")
+            return web.Response(status=403, text="Forbidden")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="Bad Request")
+        tid = body.get("id")
+        status_val = (body.get("status") or "").strip().upper()
+        if not tid:
+            return web.Response(status=200, text="OK")
+        if status_val != "CONFIRMED":
+            return web.Response(status=200, text="OK")
+        order_meta = None
+        try:
+            orders = request.app.get("platega_orders")
+            if isinstance(orders, dict):
+                order_meta = orders.get(str(tid))
+            if not order_meta:
+                order_meta = _load_platega_order_from_file(str(tid))
+                if order_meta and isinstance(orders, dict):
+                    orders[str(tid)] = order_meta
+        except Exception as e:
+            logger.warning("Platega callback: load order failed for %s: %s", tid, e)
+        if not order_meta:
+            logger.warning("Platega callback: order_meta not found for transaction_id=%s", tid)
+            return web.Response(status=200, text="OK")
+        if order_meta.get("delivered"):
+            return web.Response(status=200, text="OK")
+        purchase = order_meta.get("purchase") or {}
+        ptype = (purchase.get("type") or "").strip().lower()
+        user_id = str(order_meta.get("user_id") or "unknown")
+        try:
+            amount_rub = float(order_meta.get("amount_rub") or 0.0)
+        except (TypeError, ValueError):
+            amount_rub = 0.0
+        try:
+            if ptype == "stars":
+                recipient = (purchase.get("login") or "").strip().lstrip("@")
+                stars_amount = int(purchase.get("stars_amount") or 0)
+                if recipient and stars_amount >= 50 and TON_WALLET_ENABLED:
+                    _, recipient_address = await _fragment_get_recipient_address(recipient)
+                    req_id = await _fragment_init_buy(recipient_address, stars_amount)
+                    tx_address, amount_nanoton, payload_b64 = await _fragment_get_buy_link(req_id)
+                    payload_decoded = _fragment_encoded(payload_b64)
+                    tx_hash, send_err = await _ton_wallet_send_safe(tx_address, amount_nanoton, payload_decoded)
+                    if tx_hash:
+                        order_meta["delivered"] = True
+                        try:
+                            po = request.app.get("platega_orders")
+                            if isinstance(po, dict):
+                                po[str(tid)] = order_meta
+                        except Exception:
+                            pass
+                        _save_platega_order_to_file(str(tid), order_meta)
+                        import db as _db
+                        order_id_custom = str(purchase.get("order_id") or "").strip() or None
+                        if _db.is_enabled():
+                            await _db.user_upsert(user_id, purchase.get("username") or "", purchase.get("first_name") or "")
+                            await _db.purchase_add(user_id, amount_rub, stars_amount, "stars", f"{stars_amount} звёзд", order_id_custom)
+                        await _apply_referral_earnings_for_purchase(
+                            user_id=user_id, amount_rub=amount_rub,
+                            username=purchase.get("username") or "", first_name=purchase.get("first_name") or "",
+                        )
+                        logger.info("Platega callback: stars delivered, transaction_id=%s", tid)
+            elif ptype == "premium":
+                order_meta["delivered"] = True
+                try:
+                    po = request.app.get("platega_orders")
+                    if isinstance(po, dict):
+                        po[str(tid)] = order_meta
+                except Exception:
+                    pass
+                _save_platega_order_to_file(str(tid), order_meta)
+                await _apply_referral_earnings_for_purchase(
+                    user_id=user_id, amount_rub=amount_rub,
+                    username=purchase.get("username") or "", first_name=purchase.get("first_name") or "",
+                )
+                logger.info("Platega callback: premium recorded, transaction_id=%s", tid)
+            elif ptype == "steam":
+                account = (purchase.get("login") or "").strip()
+                amount_steam = purchase.get("amount_steam") or purchase.get("amount") or amount_rub
+                try:
+                    amount_steam = float(amount_steam)
+                except (TypeError, ValueError):
+                    amount_steam = amount_rub
+                steam_notify_chat_id = int(os.getenv("STEAM_NOTIFY_CHAT_ID", "0") or "0")
+                notify_lines = [
+                    "💻 Новый заказ Steam (Platega)",
+                    "",
+                    f"👤 Аккаунт Steam: <code>{account or '—'}</code>",
+                    f"💰 Сумма на кошелёк Steam: <b>{amount_steam:.0f} ₽</b>",
+                    f"💵 Оплачено: <b>{amount_rub:.2f} ₽</b>",
+                    f"🧾 Platega transaction_id: <code>{tid}</code>",
+                ]
+                funpay_url = os.getenv("FUNPAY_STEAM_URL", "").strip()
+                if funpay_url:
+                    notify_lines.append("")
+                    notify_lines.append(f"🛒 Лот FunPay: {funpay_url}")
+                notify_text = "\n".join(notify_lines)
+                if steam_notify_chat_id:
+                    await bot.send_message(
+                        chat_id=steam_notify_chat_id,
+                        text=notify_text,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                await _apply_referral_earnings_for_purchase(
+                    user_id=user_id, amount_rub=amount_rub,
+                    username=purchase.get("username") or "", first_name=purchase.get("first_name") or "",
+                )
+                order_meta["delivered"] = True
+                try:
+                    po = request.app.get("platega_orders")
+                    if isinstance(po, dict):
+                        po[str(tid)] = order_meta
+                except Exception:
+                    pass
+                _save_platega_order_to_file(str(tid), order_meta)
+                logger.info("Platega callback: steam processed, transaction_id=%s", tid)
+        except Exception as e:
+            logger.exception("Platega callback delivery error for %s: %s", tid, e)
+        return web.Response(status=200, text="OK")
     
     app.router.add_post("/api/cryptobot/create-invoice", cryptobot_create_invoice_handler)
     app.router.add_route("OPTIONS", "/api/cryptobot/create-invoice", lambda r: Response(status=204, headers=_cors_headers()))
@@ -4248,6 +4718,12 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/cryptobot/check-invoice", lambda r: Response(status=204, headers=_cors_headers()))
     # Webhook CryptoBot: принимаем ЛЮБОЙ метод, чтобы не ловить 405 от тестов
     app.router.add_route("*", "/api/cryptobot/webhook", cryptobot_webhook_handler)
+
+    # Platega.io: карты и СБП
+    app.router.add_post("/api/platega/create-transaction", platega_create_transaction_handler)
+    app.router.add_route("OPTIONS", "/api/platega/create-transaction", lambda r: Response(status=204, headers=_cors_headers()))
+    app.router.add_post("/api/platega/callback", platega_callback_handler)
+    app.router.add_route("OPTIONS", "/api/platega/callback", lambda r: Response(status=204, headers=_cors_headers()))
 
     # Health-check для Railway: чтобы не было 404 на /api/health
     async def health_handler(request):
