@@ -819,42 +819,42 @@ def is_admin(user_id: int) -> bool:
 
 def get_main_menu(language: str = 'ru'):
     """Главное меню (только русская раскладка)"""
-        keyboard = [
-            [
+    keyboard = [
+        [
             InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL)),
         ],
-            [
-                InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
-            ],
-            [
+        [
+            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
+        ],
+        [
             InlineKeyboardButton(text="❓ Помощь", callback_data="help_info"),
-            ]
         ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_about_menu(language: str = 'ru'):
     """Меню 'О нас' (только русский текст)"""
-        keyboard = [
-            [
+    keyboard = [
+        [
             InlineKeyboardButton(text="📞 Помощь", url="https://t.me/L3ZTADM"),
             InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/JetStoreApp")
         ],
         [
-            InlineKeyboardButton(text="📄 Договор оферты", 
+            InlineKeyboardButton(text="📄 Договор оферты",
                                url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
-            ],
-            [
-                InlineKeyboardButton(text="📜 Пользовательское соглашение", 
+        ],
+        [
+            InlineKeyboardButton(text="📜 Пользовательское соглашение",
                                url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
-            ],
-            [
-                InlineKeyboardButton(text="🔒 Политика конфиденциальности", 
+        ],
+        [
+            InlineKeyboardButton(text="🔒 Политика конфиденциальности",
                                url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
-            ]
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
         ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_admin_menu():
