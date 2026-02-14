@@ -826,42 +826,42 @@ def is_admin(user_id: int) -> bool:
 
 def get_main_menu(language: str = 'ru'):
     """Главное меню (только русская раскладка)"""
-        keyboard = [
-            [
+    keyboard = [
+        [
             InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL)),
         ],
-            [
-                InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
-            ],
-            [
+        [
+            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
+        ],
+        [
             InlineKeyboardButton(text="❓ Помощь", callback_data="help_info"),
-            ]
         ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_about_menu(language: str = 'ru'):
     """Меню 'О нас' (только русский текст)"""
-        keyboard = [
-            [
+    keyboard = [
+        [
             InlineKeyboardButton(text="📞 Помощь", url="https://t.me/L3ZTADM"),
             InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/JetStoreApp")
         ],
         [
             InlineKeyboardButton(text="📄 Договор оферты",
-                               url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
-            ],
-            [
-                InlineKeyboardButton(text="📜 Пользовательское соглашение", 
-                               url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
-            ],
-            [
-                InlineKeyboardButton(text="🔒 Политика конфиденциальности", 
-                               url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
-            ]
+                                url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
+        ],
+        [
+            InlineKeyboardButton(text="📜 Пользовательское соглашение",
+                                url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
+        ],
+        [
+            InlineKeyboardButton(text="🔒 Политика конфиденциальности",
+                                url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
         ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_admin_menu():
@@ -1683,7 +1683,7 @@ async def admin_admins(callback_query: types.CallbackQuery):
 async def show_about(callback_query: types.CallbackQuery):
     """Раздел 'О нас'"""
     # Всегда используем русскоязычный текст "О сервисе"
-        about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
+    about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
     await callback_query.message.answer(
         text=about_text,
         reply_markup=get_about_menu('ru'),
@@ -3217,8 +3217,7 @@ def setup_http_server():
             if not invoice_id:
                 return _json_response({"paid": False})
             # Продолжаем проверку только с invoice_id
-        else:
-            # Для других методов (Fragment, TON, Platega) используем purchase, order_id, transaction_id из body
+        # Для других методов (Fragment, TON, Platega) используем purchase, order_id, transaction_id из body
         purchase = body.get("purchase") or {}
         purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
         is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
@@ -3573,10 +3572,10 @@ def setup_http_server():
                                                         logger.warning(f"Failed to apply referral earnings for Steam (payment_check): {ref_err}")
 
                                                     order_meta["delivered"] = True
-                                            try:
-                                                orders = request.app.get("cryptobot_orders")
-                                                if isinstance(orders, dict):
-                                                    orders[str(invoice_id)]["delivered"] = True
+                                                    try:
+                                                        orders = request.app.get("cryptobot_orders")
+                                                        if isinstance(orders, dict):
+                                                            orders[str(invoice_id)]["delivered"] = True
                                                     except Exception:
                                                         pass
                                                     _save_cryptobot_order_to_file(str(invoice_id), order_meta)
