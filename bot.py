@@ -826,42 +826,42 @@ def is_admin(user_id: int) -> bool:
 
 def get_main_menu(language: str = 'ru'):
     """Главное меню (только русская раскладка)"""
-    keyboard = [
-        [
+        keyboard = [
+            [
             InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL)),
         ],
-        [
-            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
-        ],
-        [
+            [
+                InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp"),
+            ],
+            [
             InlineKeyboardButton(text="❓ Помощь", callback_data="help_info"),
+            ]
         ]
-    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_about_menu(language: str = 'ru'):
     """Меню 'О нас' (только русский текст)"""
-    keyboard = [
-        [
+        keyboard = [
+            [
             InlineKeyboardButton(text="📞 Помощь", url="https://t.me/L3ZTADM"),
             InlineKeyboardButton(text="📢 Наш канал", url="https://t.me/JetStoreApp")
         ],
         [
             InlineKeyboardButton(text="📄 Договор оферты",
                                url="https://telegra.ph/Dogovor-Oferty-02-11-4"),
-        ],
-        [
-            InlineKeyboardButton(text="📜 Пользовательское соглашение",
+            ],
+            [
+                InlineKeyboardButton(text="📜 Пользовательское соглашение", 
                                url="https://telegra.ph/Polzovatelskoe-soglashenie-02-11-33"),
-        ],
-        [
-            InlineKeyboardButton(text="🔒 Политика конфиденциальности",
+            ],
+            [
+                InlineKeyboardButton(text="🔒 Политика конфиденциальности", 
                                url="https://telegra.ph/Politika-konfidecialnosti-02-11"),
-        ],
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")
+            ]
         ]
-    ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_admin_menu():
@@ -1683,7 +1683,7 @@ async def admin_admins(callback_query: types.CallbackQuery):
 async def show_about(callback_query: types.CallbackQuery):
     """Раздел 'О нас'"""
     # Всегда используем русскоязычный текст "О сервисе"
-    about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
+        about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
     await callback_query.message.answer(
         text=about_text,
         reply_markup=get_about_menu('ru'),
@@ -3219,12 +3219,12 @@ def setup_http_server():
             # Продолжаем проверку только с invoice_id
         else:
             # Для других методов (Fragment, TON, Platega) используем purchase, order_id, transaction_id из body
-            purchase = body.get("purchase") or {}
-            purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
-            is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
-            is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
-            order_id = (body.get("order_id") or body.get("orderId") or "").strip()
-            transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
+        purchase = body.get("purchase") or {}
+        purchase_type = (purchase.get("type") or purchase.get("Type") or "").strip()
+        is_stars = purchase_type == "stars" or (purchase.get("stars_amount") is not None and purchase.get("stars_amount") != 0)
+        is_premium = purchase_type == "premium" or (purchase.get("months") is not None and purchase.get("months") != 0)
+        order_id = (body.get("order_id") or body.get("orderId") or "").strip()
+        transaction_id = (body.get("transaction_id") or body.get("transactionId") or "").strip()
 
         # Platega (карты / СБП): проверка по transaction_id
         if method == "platega":
@@ -3573,10 +3573,10 @@ def setup_http_server():
                                                         logger.warning(f"Failed to apply referral earnings for Steam (payment_check): {ref_err}")
 
                                                     order_meta["delivered"] = True
-                                                    try:
-                                                        orders = request.app.get("cryptobot_orders")
-                                                        if isinstance(orders, dict):
-                                                            orders[str(invoice_id)]["delivered"] = True
+                                            try:
+                                                orders = request.app.get("cryptobot_orders")
+                                                if isinstance(orders, dict):
+                                                    orders[str(invoice_id)]["delivered"] = True
                                                     except Exception:
                                                         pass
                                                     _save_cryptobot_order_to_file(str(invoice_id), order_meta)
@@ -4562,127 +4562,73 @@ def setup_http_server():
         return_url = body.get("return_url") or f"{base_url}?platega=success"
         failed_url = body.get("failed_url") or f"{base_url}?platega=fail"
         payload_str = json.dumps({"order_id": purchase.get("order_id"), "user_id": user_id}, ensure_ascii=False)[:2048]
-        # Формат: snake_case (1) или camelCase (0). flat=1 — amount/currency в корне.
-        use_snake = (os.getenv("PLATEGA_SNAKE_CASE", "1") or "1").strip().lower() in ("1", "true", "yes")
-        use_flat = (os.getenv("PLATEGA_FLAT_AMOUNT", "0") or "0").strip().lower() in ("1", "true", "yes")
         use_kopecks = (os.getenv("PLATEGA_AMOUNT_IN_KOPECKS", "0") or "0").strip().lower() in ("1", "true", "yes")
         if use_kopecks:
             amount_send = max(1, int(round(amount * 100)))
         else:
             amount_send = round(amount, 2)
-        if use_flat and use_snake:
-            platega_body = {
-                "payment_method": payment_method_int,
-                "amount": amount_send,
-                "currency": "RUB",
-                "description": description[:1024],
-                "return_url": return_url,
-                "failed_url": failed_url,
-                "payload": payload_str,
-            }
-        elif use_snake:
-            platega_body = {
-                "payment_method": payment_method_int,
-                "payment_details": {"amount": amount_send, "currency": "RUB"},
-                "description": description[:1024],
-                "return_url": return_url,
-                "failed_url": failed_url,
-                "payload": payload_str,
-            }
-        else:
-            platega_body = {
-                "paymentMethod": payment_method_int,
-                "paymentDetails": {"amount": amount_send, "currency": "RUB"},
-                "description": description[:1024],
-                "return": return_url,
-                "failedUrl": failed_url,
-                "payload": payload_str,
-            }
+        # API Platega требует PascalCase: PaymentDetails (обязательно), PaymentMethod, Description, Return, FailedUrl, Payload
+        platega_body = {
+            "PaymentMethod": payment_method_int,
+            "PaymentDetails": {"Amount": amount_send, "Currency": "RUB"},
+            "Description": description[:1024],
+            "Return": return_url,
+            "FailedUrl": failed_url,
+            "Payload": payload_str,
+        }
         headers = {
             "Content-Type": "application/json",
             "X-MerchantId": PLATEGA_MERCHANT_ID,
             "X-Secret": PLATEGA_SECRET,
         }
-        # При "Wrong input parameters" пробуем альтернативные форматы (snake/camel, число/строка для method)
-        bodies_to_try = [platega_body]
-        snake_with_details = {
-            "payment_method": payment_method_int,
-            "payment_details": {"amount": amount_send, "currency": "RUB"},
-            "description": description[:1024],
-            "return_url": return_url,
-            "failed_url": failed_url,
-            "payload": payload_str,
-        }
-        camel_with_details = {
-            "paymentMethod": payment_method_int,
-            "paymentDetails": {"amount": amount_send, "currency": "RUB"},
-            "description": description[:1024],
-            "return": return_url,
-            "failedUrl": failed_url,
-            "payload": payload_str,
-        }
-        for b in (snake_with_details, camel_with_details):
-            if b not in bodies_to_try:
-                bodies_to_try.append(b)
-        # Некоторые API ожидают payment_method как строку
-        snake_str_method = {**snake_with_details, "payment_method": str(payment_method_int)}
-        camel_str_method = {**camel_with_details, "paymentMethod": str(payment_method_int)}
-        for b in (snake_str_method, camel_str_method):
-            if b not in bodies_to_try:
-                bodies_to_try.append(b)
-        last_err = None
-        last_status = None
+        logger.info("Platega create-transaction: PaymentMethod=%s, amount_send=%s", payment_method_int, amount_send)
         try:
             async with aiohttp.ClientSession() as session:
-                for idx, req_body in enumerate(bodies_to_try):
-                    logger.info("Platega create-transaction attempt %s: payment_method=%s, amount_send=%s", idx + 1, payment_method_int, amount_send)
-                    async with session.post(
-                        f"{PLATEGA_BASE_URL}/transaction/process",
-                        headers=headers,
-                        json=req_body,
-                    ) as resp:
-                        text = await resp.text()
-                        try:
-                            data = json.loads(text) if text else {}
-                        except json.JSONDecodeError:
-                            last_err = text[:200]
-                            last_status = resp.status
-                            continue
-                        if resp.status != 200:
-                            err = data.get("error") or data.get("message") or data.get("detail") or text[:300]
-                            last_err = str(err)
-                            last_status = resp.status
-                            logger.warning("Platega create-transaction attempt %s failed: status=%s, body=%s", idx + 1, resp.status, text[:500])
-                            if "wrong input" in (err or "").lower() and idx + 1 < len(bodies_to_try):
-                                continue
-                            return _json_response({"error": "platega_error", "message": last_err}, status=502)
-                        transaction_id = data.get("transactionId") or data.get("transaction_id")
-                        redirect_url = data.get("redirect") or data.get("payment_url") or ""
-                        if not transaction_id or not redirect_url:
-                            return _json_response({"error": "platega_error", "message": "Нет transactionId или redirect в ответе"}, status=502)
-                        order_meta = {
-                            "context": context,
-                            "user_id": user_id,
-                            "amount_rub": float(amount),
-                            "purchase": dict(purchase),
-                            "order_id": purchase.get("order_id"),
-                            "created_at": time.time(),
-                            "delivered": False,
-                        }
-                        try:
-                            po = request.app.get("platega_orders")
-                            if isinstance(po, dict):
-                                po[str(transaction_id)] = order_meta
-                        except Exception:
-                            pass
-                        _save_platega_order_to_file(str(transaction_id), order_meta)
-                        logger.info("Platega transaction created: transaction_id=%s, amount=%s", transaction_id, amount)
-                        return _json_response({
-                            "success": True,
-                            "transaction_id": transaction_id,
-                            "redirect": redirect_url,
-                        })
-                return _json_response({"error": "platega_error", "message": last_err or "Wrong input parameters"}, status=502)
+                async with session.post(
+                    f"{PLATEGA_BASE_URL}/transaction/process",
+                    headers=headers,
+                    json=platega_body,
+                ) as resp:
+                    text = await resp.text()
+                    try:
+                        data = json.loads(text) if text else {}
+                    except json.JSONDecodeError:
+                        logger.warning("Platega create-transaction: response not JSON, status=%s, body=%s", resp.status, text[:300])
+                        return _json_response({"error": "platega_error", "message": f"Ответ не JSON: {text[:200]}"}, status=502)
+                    if resp.status != 200:
+                        err = data.get("error") or data.get("message") or data.get("detail") or text[:300]
+                        if isinstance(data.get("errors"), dict):
+                            err_parts = [f"{k}: {v}" for k, v in data["errors"].items()]
+                            if err_parts:
+                                err = "; ".join(str(x) for x in err_parts)
+                        logger.warning("Platega create-transaction failed: status=%s, body=%s", resp.status, text[:500])
+                        return _json_response({"error": "platega_error", "message": str(err)}, status=502)
+                    transaction_id = data.get("transactionId") or data.get("transaction_id")
+                    redirect_url = data.get("redirect") or data.get("payment_url") or ""
+                    if not transaction_id or not redirect_url:
+                        return _json_response({"error": "platega_error", "message": "Нет transactionId или redirect в ответе"}, status=502)
+                    order_meta = {
+                        "context": context,
+                        "user_id": user_id,
+                        "amount_rub": float(amount),
+                        "purchase": dict(purchase),
+                        "order_id": purchase.get("order_id"),
+                        "created_at": time.time(),
+                        "delivered": False,
+                    }
+                    try:
+                        po = request.app.get("platega_orders")
+                        if isinstance(po, dict):
+                            po[str(transaction_id)] = order_meta
+                    except Exception:
+                        pass
+                    _save_platega_order_to_file(str(transaction_id), order_meta)
+                    logger.info("Platega transaction created: transaction_id=%s, amount=%s", transaction_id, amount)
+                    return _json_response({
+                        "success": True,
+                        "transaction_id": transaction_id,
+                        "redirect": redirect_url,
+                    })
         except aiohttp.ClientError as e:
             logger.error("Platega create transaction network error: %s", e)
             return _json_response({"error": "network_error", "message": str(e)}, status=502)
