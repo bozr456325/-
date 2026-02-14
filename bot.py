@@ -4562,9 +4562,15 @@ def setup_http_server():
         return_url = body.get("return_url") or f"{base_url}?platega=success"
         failed_url = body.get("failed_url") or f"{base_url}?platega=fail"
         payload_str = json.dumps({"order_id": purchase.get("order_id"), "user_id": user_id}, ensure_ascii=False)[:2048]
+        # Формат суммы: по умолчанию копейки (1=да), иначе рубли. При "Wrong input parameters" см. docs.platega.io
+        use_kopecks = (os.getenv("PLATEGA_AMOUNT_IN_KOPECKS", "1") or "1").strip().lower() in ("1", "true", "yes")
+        if use_kopecks:
+            amount_send = max(1, int(round(amount * 100)))
+        else:
+            amount_send = round(amount, 2)
         platega_body = {
             "paymentMethod": payment_method_int,
-            "paymentDetails": {"amount": amount, "currency": "RUB"},
+            "paymentDetails": {"amount": amount_send, "currency": "RUB"},
             "description": description[:1024],
             "return": return_url,
             "failedUrl": failed_url,
@@ -4575,6 +4581,7 @@ def setup_http_server():
             "X-MerchantId": PLATEGA_MERCHANT_ID,
             "X-Secret": PLATEGA_SECRET,
         }
+        logger.info("Platega create-transaction request: paymentMethod=%s, amount_rub=%s, amount_send=%s (kopecks=%s)", payment_method_int, amount, amount_send, use_kopecks)
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -4586,9 +4593,11 @@ def setup_http_server():
                     try:
                         data = json.loads(text) if text else {}
                     except json.JSONDecodeError:
+                        logger.warning("Platega create-transaction: response not JSON, status=%s, body=%s", resp.status, text[:300])
                         return _json_response({"error": "platega_error", "message": f"Ответ не JSON: {text[:200]}"}, status=502)
                     if resp.status != 200:
-                        err = data.get("error") or data.get("message") or text[:200]
+                        err = data.get("error") or data.get("message") or data.get("detail") or text[:300]
+                        logger.warning("Platega create-transaction failed: status=%s, body=%s", resp.status, text[:500])
                         return _json_response({"error": "platega_error", "message": str(err)}, status=502)
                     transaction_id = data.get("transactionId") or data.get("transaction_id")
                     redirect_url = data.get("redirect") or data.get("payment_url") or ""
