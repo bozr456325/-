@@ -1677,8 +1677,7 @@ async def admin_admins(callback_query: types.CallbackQuery):
 async def show_about(callback_query: types.CallbackQuery):
     """Раздел 'О нас'"""
     # Всегда используем русскоязычный текст "О сервисе"
-        about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
-    
+    about_text = db.get_content('about_text_ru', 'Информация о сервисе...')
     await callback_query.message.answer(
         text=about_text,
         reply_markup=get_about_menu('ru'),
