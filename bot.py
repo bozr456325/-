@@ -3567,10 +3567,10 @@ def setup_http_server():
                                                         logger.warning(f"Failed to apply referral earnings for Steam (payment_check): {ref_err}")
 
                                                     order_meta["delivered"] = True
-                                            try:
-                                                orders = request.app.get("cryptobot_orders")
-                                                if isinstance(orders, dict):
-                                                    orders[str(invoice_id)]["delivered"] = True
+                                                    try:
+                                                        orders = request.app.get("cryptobot_orders")
+                                                        if isinstance(orders, dict):
+                                                            orders[str(invoice_id)]["delivered"] = True
                                                     except Exception:
                                                         pass
                                                     _save_cryptobot_order_to_file(str(invoice_id), order_meta)
@@ -3614,7 +3614,6 @@ def setup_http_server():
                                                         except Exception:
                                                             pass
                                                         _save_cryptobot_order_to_file(str(invoice_id), order_meta)
-                                                        
                                                         # Записываем покупку в рейтинг (как в вебхуке)
                                                         try:
                                                             user_id = str(order_meta.get("user_id") or "unknown")
