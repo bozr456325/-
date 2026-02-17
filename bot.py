@@ -2990,6 +2990,9 @@ def setup_http_server():
     FREEKASSA_SHOP_ID = (os.getenv("FREEKASSA_SHOP_ID") or "").strip()
     FREEKASSA_API_KEY = _get_env_clean("FREEKASSA_API_KEY") or ""
     FREEKASSA_SECRET2 = _get_env_clean("FREEKASSA_SECRET2") or ""
+    # Комиссия FreeKassa (переложенная на пользователя): СБП % и Карты %
+    FREEKASSA_SBP_PERCENT = float(os.getenv("FREEKASSA_SBP_PERCENT", "7") or "7")
+    FREEKASSA_CARDS_PERCENT = float(os.getenv("FREEKASSA_CARDS_PERCENT", "8") or "8")
 
     def _get_client_ip(request: web.Request) -> str:
         # Пытаемся взять реальный IP, если прокси передаёт заголовки
@@ -4908,6 +4911,15 @@ def setup_http_server():
             description = f"Пополнение Steam для {login} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
         else:
             return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium и Steam"}, status=400)
+
+        # Применяем комиссию FreeKassa (переложенную на пользователя)
+        commission_pct = 0.0
+        if method == "sbp":
+            commission_pct = FREEKASSA_SBP_PERCENT
+        elif method == "card":
+            commission_pct = FREEKASSA_CARDS_PERCENT
+        if commission_pct and commission_pct != 0.0:
+            amount = round(amount * (1 + commission_pct / 100.0), 2)
 
         if fk_i not in (36, 44, 43):
             # 44 — СБП (QR), 36 — карты РФ, 43 — SberPay
