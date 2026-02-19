@@ -2531,8 +2531,9 @@ def setup_http_server():
                 import db as _db_rates
                 if _db_rates.is_enabled():
                     await _db_rates.rates_set("steam_rate_rub", rate)
+                    logger.info(f"Saved steam_rate_rub={rate} to DB")
             except Exception as e:
-                logger.debug("rates_set steam_rate_rub: %s", e)
+                logger.warning(f"rates_set steam_rate_rub error: {e}")
             return _json_response({"steam_rate_rub": _steam_rate_rub_override})
         try:
             rate = _get_steam_rate_rub()
@@ -2565,8 +2566,9 @@ def setup_http_server():
                             import db as _db_rates
                             if _db_rates.is_enabled():
                                 await _db_rates.rates_set("star_price_rub", r)
+                                logger.info(f"Saved star_price_rub={r} to DB")
                         except Exception as e:
-                            logger.debug("rates_set star_price_rub: %s", e)
+                            logger.warning(f"rates_set star_price_rub error: {e}")
                 except (TypeError, ValueError):
                     pass
             v = body.get("star_buy_rate_rub")
@@ -2580,8 +2582,9 @@ def setup_http_server():
                             import db as _db_rates
                             if _db_rates.is_enabled():
                                 await _db_rates.rates_set("star_buy_rate_rub", r)
+                                logger.info(f"Saved star_buy_rate_rub={r} to DB")
                         except Exception as e:
-                            logger.debug("rates_set star_buy_rate_rub: %s", e)
+                            logger.warning(f"rates_set star_buy_rate_rub error: {e}")
                 except (TypeError, ValueError):
                     pass
             if updated:
@@ -2620,8 +2623,9 @@ def setup_http_server():
                                 import db as _db_prem
                                 if _db_prem.is_enabled():
                                     await _db_prem.rates_set(key_name, r)
+                                    logger.info(f"Saved {key_name}={r} to DB")
                             except Exception as e:
-                                logger.debug("rates_set %s: %s", key_name, e)
+                                logger.warning(f"rates_set {key_name} error: {e}")
                     except (TypeError, ValueError):
                         pass
             return _json_response({"success": True})
@@ -4310,17 +4314,25 @@ def setup_http_server():
             if not _validate_user_id(user_id):
                 return _json_response({"error": "bad_request", "message": "Некорректный user_id"}, status=400)
             rates_db = {}
+            db_enabled = False
             try:
                 import db as _db_pg
-                if _db_pg.is_enabled():
+                db_enabled = _db_pg.is_enabled()
+                if db_enabled:
                     rates_db = await _db_pg.rates_get()
+                    logger.info(f"CryptoBot: rates from DB: {rates_db}")
             except Exception as e:
-                logger.debug("rates_get: %s", e)
-            _star = float(rates_db.get("star_price_rub") or 0) or _get_star_price_rub()
-            _steam = float(rates_db.get("steam_rate_rub") or 0) or _get_steam_rate_rub()
-            _premium = {3: float(rates_db.get("premium_3") or 0) or PREMIUM_PRICES_RUB.get(3, 983),
-                        6: float(rates_db.get("premium_6") or 0) or PREMIUM_PRICES_RUB.get(6, 1311),
-                        12: float(rates_db.get("premium_12") or 0) or PREMIUM_PRICES_RUB.get(12, 2377)}
+                logger.warning(f"CryptoBot rates_get error: {e}")
+            star_from_db = rates_db.get("star_price_rub")
+            steam_from_db = rates_db.get("steam_rate_rub")
+            _star = float(star_from_db) if star_from_db is not None and float(star_from_db) > 0 else _get_star_price_rub()
+            _steam = float(steam_from_db) if steam_from_db is not None and float(steam_from_db) > 0 else _get_steam_rate_rub()
+            _premium = {
+                3: float(rates_db.get("premium_3")) if rates_db.get("premium_3") is not None and float(rates_db.get("premium_3", 0)) > 0 else PREMIUM_PRICES_RUB.get(3, 983),
+                6: float(rates_db.get("premium_6")) if rates_db.get("premium_6") is not None and float(rates_db.get("premium_6", 0)) > 0 else PREMIUM_PRICES_RUB.get(6, 1311),
+                12: float(rates_db.get("premium_12")) if rates_db.get("premium_12") is not None and float(rates_db.get("premium_12", 0)) > 0 else PREMIUM_PRICES_RUB.get(12, 2377)
+            }
+            logger.info(f"CryptoBot create-invoice: ptype={ptype}, DB enabled={db_enabled}, star_rate={_star}, steam_rate={_steam}")
             # Игнорируем amount, price, payload от клиента — всё считаем на бэке
             if ptype == "stars" and (purchase.get("amount") is not None or purchase.get("price") is not None):
                 return _json_response(
@@ -4919,17 +4931,25 @@ def setup_http_server():
         amount = 0.0
         description = ""
         rates_db = {}
+        db_enabled = False
         try:
             import db as _db_pg
-            if _db_pg.is_enabled():
+            db_enabled = _db_pg.is_enabled()
+            if db_enabled:
                 rates_db = await _db_pg.rates_get()
+                logger.info(f"Platega: rates from DB: {rates_db}")
         except Exception as e:
-            logger.debug("rates_get: %s", e)
-        _star = float(rates_db.get("star_price_rub") or 0) or _get_star_price_rub()
-        _steam = float(rates_db.get("steam_rate_rub") or 0) or _get_steam_rate_rub()
-        _premium = {3: float(rates_db.get("premium_3") or 0) or PREMIUM_PRICES_RUB.get(3, 983),
-                    6: float(rates_db.get("premium_6") or 0) or PREMIUM_PRICES_RUB.get(6, 1311),
-                    12: float(rates_db.get("premium_12") or 0) or PREMIUM_PRICES_RUB.get(12, 2377)}
+            logger.warning(f"Platega rates_get error: {e}")
+        star_from_db = rates_db.get("star_price_rub")
+        steam_from_db = rates_db.get("steam_rate_rub")
+        _star = float(star_from_db) if star_from_db is not None and float(star_from_db) > 0 else _get_star_price_rub()
+        _steam = float(steam_from_db) if steam_from_db is not None and float(steam_from_db) > 0 else _get_steam_rate_rub()
+        _premium = {
+            3: float(rates_db.get("premium_3")) if rates_db.get("premium_3") is not None and float(rates_db.get("premium_3", 0)) > 0 else PREMIUM_PRICES_RUB.get(3, 983),
+            6: float(rates_db.get("premium_6")) if rates_db.get("premium_6") is not None and float(rates_db.get("premium_6", 0)) > 0 else PREMIUM_PRICES_RUB.get(6, 1311),
+            12: float(rates_db.get("premium_12")) if rates_db.get("premium_12") is not None and float(rates_db.get("premium_12", 0)) > 0 else PREMIUM_PRICES_RUB.get(12, 2377)
+        }
+        logger.info(f"Platega create-transaction: ptype={ptype}, DB enabled={db_enabled}, star_rate={_star}, steam_rate={_steam}")
         if ptype == "stars":
             try:
                 stars_amount = int(purchase.get("stars_amount") or purchase.get("starsAmount") or 0)
@@ -5226,17 +5246,26 @@ def setup_http_server():
 
         # Курсы из БД (если PostgreSQL подключён) или из файла/env
         rates_db = {}
+        db_enabled = False
         try:
             import db as _db_pg
-            if _db_pg.is_enabled():
+            db_enabled = _db_pg.is_enabled()
+            if db_enabled:
                 rates_db = await _db_pg.rates_get()
+                logger.info(f"FreeKassa: rates from DB: {rates_db}")
         except Exception as e:
-            logger.debug("rates_get: %s", e)
-        _star = float(rates_db.get("star_price_rub") or 0) or _get_star_price_rub()
-        _steam = float(rates_db.get("steam_rate_rub") or 0) or _get_steam_rate_rub()
-        _premium = {3: float(rates_db.get("premium_3") or 0) or PREMIUM_PRICES_RUB.get(3, 983),
-                    6: float(rates_db.get("premium_6") or 0) or PREMIUM_PRICES_RUB.get(6, 1311),
-                    12: float(rates_db.get("premium_12") or 0) or PREMIUM_PRICES_RUB.get(12, 2377)}
+            logger.warning(f"FreeKassa rates_get error: {e}")
+        # Используем курс из БД, если есть и > 0, иначе fallback
+        star_from_db = rates_db.get("star_price_rub")
+        steam_from_db = rates_db.get("steam_rate_rub")
+        _star = float(star_from_db) if star_from_db is not None and float(star_from_db) > 0 else _get_star_price_rub()
+        _steam = float(steam_from_db) if steam_from_db is not None and float(steam_from_db) > 0 else _get_steam_rate_rub()
+        _premium = {
+            3: float(rates_db.get("premium_3")) if rates_db.get("premium_3") is not None and float(rates_db.get("premium_3", 0)) > 0 else PREMIUM_PRICES_RUB.get(3, 983),
+            6: float(rates_db.get("premium_6")) if rates_db.get("premium_6") is not None and float(rates_db.get("premium_6", 0)) > 0 else PREMIUM_PRICES_RUB.get(6, 1311),
+            12: float(rates_db.get("premium_12")) if rates_db.get("premium_12") is not None and float(rates_db.get("premium_12", 0)) > 0 else PREMIUM_PRICES_RUB.get(12, 2377)
+        }
+        logger.info(f"FreeKassa create-order: ptype={ptype}, DB enabled={db_enabled}, star_rate={_star}, steam_rate={_steam}")
 
         if ptype == "stars":
             try:
