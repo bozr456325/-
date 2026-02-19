@@ -49,13 +49,16 @@ logger = logging.getLogger(__name__)
 # Домен: Jetstoreapp.ru
 # ВАЖНО: токен бота ДОЛЖЕН задаваться только через переменную окружения BOT_TOKEN.
 # Никаких дефолтных значений в коде быть не должно, чтобы не утек секретный токен.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+# Токен ТОЛЬКО из переменной окружения, без fallback (чтобы не утек при деплое)
+BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
 if not BOT_TOKEN:
     raise RuntimeError(
         "BOT_TOKEN не задан. Установите переменную окружения BOT_TOKEN "
         "(например, в Railway/Render) перед запуском бота."
     )
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "6928639672,5235957477").split(",") if x.strip()]
+# Админы ТОЛЬКО из env (без дефолта, чтобы не дать доступ по умолчанию)
+_admin_ids_str = (os.environ.get("ADMIN_IDS") or "").strip()
+ADMIN_IDS = [int(x) for x in _admin_ids_str.split(",") if x.strip()] if _admin_ids_str else []
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://jetstoreapp.ru")
 ADM_WEB_APP_URL = os.getenv("ADM_WEB_APP_URL", "https://jetstoreapp.ru/html/admin.html")
 
@@ -117,6 +120,92 @@ _B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 # Ограничение по отправке идей: один запрос раз в 12 часов на пользователя
 IDEAS_LIMITS_FILE = os.path.join(_SCRIPT_DIR, "ideas_limits.json")
+
+# ============ ЗАЩИТА ОТ ХАКЕРОВ: лимиты и валидация ============
+VALIDATION_LIMITS = {
+    "stars_min": 50,
+    "stars_max": 50000,
+    "steam_min": 50,
+    "steam_max": 500000,
+    "amount_rub_max": 2_000_000,
+    "login_max_len": 32,
+    "order_id_max_len": 64,
+    "username_max_len": 32,
+    "premium_months": (3, 6, 12),
+}
+
+
+def _validate_user_id(user_id: str) -> bool:
+    """Проверка user_id: только цифры, разумная длина."""
+    if not user_id or not isinstance(user_id, str):
+        return False
+    s = str(user_id).strip()
+    if len(s) > 20:
+        return False
+    return s.isdigit()
+
+
+def _validate_login(login: str, field_name: str = "login") -> tuple[str, Optional[str]]:
+    """Валидация логина/username: только буквы, цифры, подчёркивание. Возвращает (очищенный, ошибка)."""
+    if not login or not isinstance(login, str):
+        return ("", f"{field_name} обязателен")
+    s = login.strip().lstrip("@")
+    if len(s) > VALIDATION_LIMITS["login_max_len"]:
+        return (s[:VALIDATION_LIMITS["login_max_len"]], None)
+    if not re.match(r"^[a-zA-Z0-9_]+$", s):
+        return ("", f"{field_name}: только латиница, цифры и _")
+    return (s, None)
+
+
+def _validate_order_id(order_id: str) -> tuple[str, Optional[str]]:
+    """Валидация order_id: буквы, цифры, дефис, подчёркивание."""
+    if not order_id or not isinstance(order_id, str):
+        return ("", "order_id обязателен")
+    s = str(order_id).strip()
+    if len(s) > VALIDATION_LIMITS["order_id_max_len"]:
+        return ("", "order_id слишком длинный")
+    if not re.match(r"^[a-zA-Z0-9_#-]+$", s):
+        return ("", "order_id: недопустимые символы")
+    return (s, None)
+
+
+def _validate_stars_amount(amount: int) -> Optional[str]:
+    """Проверка количества звёзд."""
+    if not isinstance(amount, int):
+        return "Некорректное количество звёзд"
+    if amount < VALIDATION_LIMITS["stars_min"]:
+        return f"Минимум {VALIDATION_LIMITS['stars_min']} звёзд"
+    if amount > VALIDATION_LIMITS["stars_max"]:
+        return f"Максимум {VALIDATION_LIMITS['stars_max']} звёзд за одну покупку"
+    return None
+
+
+def _validate_steam_amount(amount: float) -> Optional[str]:
+    """Проверка суммы Steam."""
+    try:
+        a = float(amount)
+    except (TypeError, ValueError):
+        return "Некорректная сумма"
+    if a < VALIDATION_LIMITS["steam_min"]:
+        return f"Минимум {VALIDATION_LIMITS['steam_min']} ₽ для Steam"
+    if a > VALIDATION_LIMITS["steam_max"]:
+        return f"Максимум {VALIDATION_LIMITS['steam_max']} ₽ для Steam"
+    return None
+
+
+def _validate_amount_rub(amount: float) -> Optional[str]:
+    """Проверка суммы в рублях."""
+    try:
+        a = float(amount)
+    except (TypeError, ValueError):
+        return "Некорректная сумма"
+    if a <= 0:
+        return "Сумма должна быть > 0"
+    if a > VALIDATION_LIMITS["amount_rub_max"]:
+        return f"Сумма превышает лимит"
+    if a != a:  # NaN
+        return "Некорректная сумма"
+    return None
 
 
 def _ref_secret_int() -> int:
@@ -2107,6 +2196,25 @@ def setup_http_server():
 
     app.router.add_get('/api/config', api_config_handler)
 
+    # Admin: проверка пароля на бэкенде (пароль в ADMIN_PASSWORD env)
+    ADMIN_PASSWORD = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+
+    async def admin_verify_handler(request):
+        """POST /api/admin/verify — проверка пароля админки. JSON: { "password": "..." }"""
+        try:
+            body = await request.json()
+        except Exception:
+            return _json_response({"ok": False, "message": "Invalid JSON"}, status=400)
+        pwd = (body.get("password") or "").strip()
+        if not ADMIN_PASSWORD:
+            logger.warning("ADMIN_PASSWORD не задан в env — админка не защищена")
+            return _json_response({"ok": False, "message": "Админка не настроена"}, status=503)
+        ok = pwd and len(pwd) > 0 and pwd == ADMIN_PASSWORD
+        return _json_response({"ok": ok})
+
+    app.router.add_post("/api/admin/verify", admin_verify_handler)
+    app.router.add_route("OPTIONS", "/api/admin/verify", lambda r: Response(status=204, headers=_cors_headers()))
+
     # Отдаём robots.txt, чтобы боты (например, Яндекс) не вызывали 404 и не засоряли логи
     async def robots_handler(request):
         """
@@ -3294,20 +3402,27 @@ def setup_http_server():
 
         # FreeKassa (СБП / карты): проверка по нашему order_id (MERCHANT_ORDER_ID)
         if method in ("sbp", "card"):
-            order_id = (body.get("order_id") or body.get("orderId") or "").strip()
-            if not order_id:
+            order_id_raw = (body.get("order_id") or body.get("orderId") or "").strip()
+            if not order_id_raw:
                 return _json_response({"paid": False})
+            # Очищаем order_id от # и недопустимых символов (как при создании заказа)
+            import re as _re
+            payment_id = order_id_raw.lstrip("#").strip()
+            payment_id = _re.sub(r'[^a-zA-Z0-9_-]', '', payment_id)
+            if not payment_id:
+                payment_id = order_id_raw.lstrip("#").replace("#", "").replace(" ", "").replace("-", "_")
             orders_fk = request.app.get("freekassa_orders") or {}
             order_meta = None
             if isinstance(orders_fk, dict):
-                order_meta = orders_fk.get(str(order_id))
+                order_meta = orders_fk.get(str(payment_id))
             if not order_meta:
-                order_meta = _load_freekassa_order_from_file(str(order_id))
+                order_meta = _load_freekassa_order_from_file(str(payment_id))
                 if order_meta and isinstance(orders_fk, dict):
-                    orders_fk[str(order_id)] = order_meta
+                    orders_fk[str(payment_id)] = order_meta
             if order_meta and order_meta.get("delivered"):
-                return _json_response({"paid": True, "order_id": order_id})
-            return _json_response({"paid": False, "order_id": order_id})
+                # Возвращаем оригинальный order_id с # для фронтенда
+                return _json_response({"paid": True, "order_id": order_id_raw, "delivered_by_freekassa": True})
+            return _json_response({"paid": False, "order_id": order_id_raw})
 
         # Platega (карты / СБП): проверка по transaction_id
         if method == "platega":
@@ -3820,54 +3935,9 @@ def setup_http_server():
     app.router.add_get("/api/fragment/status", fragment_status_handler)
     app.router.add_route("OPTIONS", "/api/fragment/status", lambda r: Response(status=204, headers=_cors_headers()))
 
-    async def fragment_deliver_stars_handler(request):
-        """
-        Выдача звёзд как в ezstar: бот отправляет TON с своего кошелька в Fragment
-        (get address → init → get link → send TON).
-
-        ВНИМАНИЕ: этот хендлер больше не должен вызываться напрямую с клиентской стороны.
-        Публичный HTTP‑эндпоинт /api/fragment/deliver-stars отключён, чтобы злоумышленник
-        не мог бесплатно выдавать себе звёзды, просто сделав POST‑запрос.
-
-        Логику выдачи звёзд следует вызывать только из доверенного бекенда
-        (например, из webhook‑обработчика платёжной системы или админ‑скрипта),
-        передавая сюда уже проверенные данные.
-        """
-        if not TON_WALLET_ENABLED:
-            return _json_response({
-                "error": "not_configured",
-                "message": "TONAPI_KEY и MNEMONIC не заданы. Укажите в fragment_site_config.json (рядом с bot.py или в текущей папке) или в переменных окружения TONAPI_KEY и MNEMONIC (24 слова через пробел)."
-            }, status=503)
-        try:
-            body = await request.json()
-        except Exception:
-            return _json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
-        recipient = (body.get("recipient") or body.get("username") or "").strip().lstrip("@")
-        stars_amount = body.get("stars_amount") or body.get("quantity")
-        if not recipient or not stars_amount:
-            return _json_response({"error": "bad_request", "message": "recipient и stars_amount обязательны"}, status=400)
-        stars_amount = int(stars_amount)
-        if stars_amount < 50 or stars_amount > 1_000_000:
-            return _json_response({"error": "bad_request", "message": "stars_amount 50..1000000"}, status=400)
-        if not FRAGMENT_SITE_ENABLED:
-            return _json_response({"error": "not_configured", "message": "Fragment cookies+hash не заданы"}, status=503)
-        try:
-            _, recipient_address = await _fragment_get_recipient_address(recipient)
-            req_id = await _fragment_init_buy(recipient_address, stars_amount)
-            tx_address, amount_nanoton, payload_b64 = await _fragment_get_buy_link(req_id)
-            payload_decoded = _fragment_encoded(payload_b64)
-            tx_hash, send_err = await _ton_wallet_send_safe(tx_address, amount_nanoton, payload_decoded)
-            if not tx_hash:
-                msg = send_err or "Не удалось отправить TON"
-                return _json_response({"error": "wallet_error", "message": msg}, status=502)
-            logger.info("Fragment stars delivered: recipient=%s, amount=%s, tx=%s", recipient, stars_amount, tx_hash)
-            return _json_response({"success": True, "recipient": recipient, "stars_amount": stars_amount, "tx_hash": tx_hash})
-        except RuntimeError as e:
-            logger.warning("Fragment deliver-stars: %s", e)
-            return _json_response({"error": "fragment_error", "message": str(e)}, status=400)
-        except Exception as e:
-            logger.exception("Fragment deliver-stars error: %s", e)
-            return _json_response({"error": "internal_error", "message": str(e)}, status=500)
+    # /api/fragment/deliver-stars УДАЛЁН. Выдача звёзд — ТОЛЬКО через webhooks платёжек
+    # (CryptoBot webhook, Platega callback, FreeKassa notify). Публичный эндпоинт позволил бы
+    # любому выдать себе звёзды без оплаты.
 
     # Создание заказа Fragment: при наличии TON-кошелька — только валидация (оплата CryptoBot → deliver-stars). Иначе — ссылка на оплату TON.
     async def fragment_create_star_order_handler(request):
@@ -3999,32 +4069,36 @@ def setup_http_server():
         use_usdt = False  # пока создаём инвойсы только в RUB, USDT-логику можно добавить отдельно
 
         # ----------- Покупка (звёзды / премиум / Steam) -----------
+        # ВАЖНО: клиент НЕ задаёт цену и payload. Только type + минимальные данные.
+        # Цена считается на бэке из stars_amount * STAR_PRICE_RUB и т.д.
         if context == "purchase":
             purchase = body.get("purchase") or {}
             ptype = (purchase.get("type") or "").strip()
+            if not _validate_user_id(user_id):
+                return _json_response({"error": "bad_request", "message": "Некорректный user_id"}, status=400)
+            # Игнорируем amount, price, payload от клиента — всё считаем на бэке
+            if ptype == "stars" and (purchase.get("amount") is not None or purchase.get("price") is not None):
+                return _json_response(
+                    {"error": "bad_request", "message": "Для звёзд передавайте только stars_amount и login. Цена рассчитывается на сервере."},
+                    status=400,
+                )
 
             if ptype == "stars":
                 try:
                     stars_amount = int(purchase.get("stars_amount") or purchase.get("starsAmount") or 0)
                 except (TypeError, ValueError):
                     stars_amount = 0
-                login = (purchase.get("login") or "").strip().lstrip("@")
-                if stars_amount < 50:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Минимальное количество звёзд: 50"}, status=400
-                    )
-                if stars_amount > 1_000_000:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Максимальное количество звёзд: 1,000,000"}, status=400
-                    )
-                if not login:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Укажите получателя звёзд"}, status=400
-                    )
+                login_val, login_err = _validate_login(purchase.get("login") or "", "Получатель")
+                if login_err:
+                    return _json_response({"error": "bad_request", "message": login_err}, status=400)
+                stars_err = _validate_stars_amount(stars_amount)
+                if stars_err:
+                    return _json_response({"error": "bad_request", "message": stars_err}, status=400)
                 amount = round(stars_amount * STAR_PRICE_RUB, 2)
                 if amount < 1:
                     amount = 1.0
-                description = f"Звёзды Telegram — {stars_amount} шт. для @{login}"
+                description = f"Звёзды Telegram — {stars_amount} шт. для @{login_val}"
+                login = login_val
                 payload_data = json.dumps(
                     {
                         "context": "purchase",
@@ -4042,6 +4116,10 @@ def setup_http_server():
                     months = int(purchase.get("months") or 0)
                 except (TypeError, ValueError):
                     months = 0
+                if months not in VALIDATION_LIMITS["premium_months"]:
+                    return _json_response(
+                        {"error": "bad_request", "message": "Premium: допустимые периоды 3, 6 или 12 мес."}, status=400
+                    )
                 if months not in PREMIUM_PRICES_RUB:
                     return _json_response(
                         {"error": "bad_request", "message": "Неверная длительность Premium"}, status=400
@@ -4060,31 +4138,22 @@ def setup_http_server():
                     ensure_ascii=False,
                 )[:4096]
             elif ptype == "steam":
-                # Покупка пополнения Steam: клиент передаёт amount_steam (рубли на Steam),
-                # сумма к оплате = amount_steam * STEAM_RATE_RUB (курс из админки/env).
+                # Покупка пополнения Steam: клиент передаёт amount_steam (рубли на Steam)
                 try:
                     amount_steam = float(purchase.get("amount_steam") or purchase.get("amount") or 0)
                 except (TypeError, ValueError):
                     amount_steam = 0.0
-                login = (purchase.get("login") or "").strip()
-                # Минимальная сумма пополнения Steam — 50 ₽ на кошелёк
-                if amount_steam < 50:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Минимальная сумма пополнения Steam — 50 ₽"}, status=400
-                    )
+                login_val, login_err = _validate_login(purchase.get("login") or "", "Логин Steam")
+                if login_err:
+                    return _json_response({"error": "bad_request", "message": login_err}, status=400)
+                steam_err = _validate_steam_amount(amount_steam)
+                if steam_err:
+                    return _json_response({"error": "bad_request", "message": steam_err}, status=400)
                 amount_rub = round(amount_steam * _get_steam_rate_rub(), 2)
-                if amount_rub <= 0:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Неверная сумма пополнения Steam"}, status=400
-                    )
-                if amount_rub > 1_000_000:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Максимальная сумма 1,000,000 ₽"}, status=400
-                    )
-                if not login:
-                    return _json_response(
-                        {"error": "bad_request", "message": "Укажите логин Steam"}, status=400
-                    )
+                rub_err = _validate_amount_rub(amount_rub)
+                if rub_err:
+                    return _json_response({"error": "bad_request", "message": rub_err}, status=400)
+                login = login_val
                 amount = float(amount_rub)
                 description = f"Пополнение Steam для {login} на {amount_steam:.0f} ₽ (к оплате {amount_rub:.2f} ₽)"
                 payload_data = json.dumps(
@@ -4599,6 +4668,8 @@ def setup_http_server():
         purchase = body.get("purchase") or {}
         if context != "purchase":
             return _json_response({"error": "bad_request", "message": "Только context=purchase поддерживается"}, status=400)
+        if not _validate_user_id(user_id):
+            return _json_response({"error": "bad_request", "message": "Некорректный user_id"}, status=400)
         ptype = (purchase.get("type") or "").strip()
         amount = 0.0
         description = ""
@@ -4607,15 +4678,21 @@ def setup_http_server():
                 stars_amount = int(purchase.get("stars_amount") or purchase.get("starsAmount") or 0)
             except (TypeError, ValueError):
                 stars_amount = 0
-            login = (purchase.get("login") or "").strip().lstrip("@")
-            if stars_amount < 50 or stars_amount > 1_000_000 or not login:
-                return _json_response({"error": "bad_request", "message": "Звёзды: 50..1000000 и получатель обязательны"}, status=400)
+            login_val, login_err = _validate_login(purchase.get("login") or "", "Получатель")
+            if login_err:
+                return _json_response({"error": "bad_request", "message": login_err}, status=400)
+            stars_err = _validate_stars_amount(stars_amount)
+            if stars_err:
+                return _json_response({"error": "bad_request", "message": stars_err}, status=400)
             amount = round(stars_amount * STAR_PRICE_RUB, 2)
             if amount < 1:
                 amount = 1.0
-            description = f"Звёзды Telegram — {stars_amount} шт. для @{login}"
+            purchase["login"] = login_val
+            description = f"Звёзды Telegram — {stars_amount} шт. для @{login_val}"
         elif ptype == "premium":
             months = int(purchase.get("months") or 0)
+            if months not in VALIDATION_LIMITS["premium_months"]:
+                return _json_response({"error": "bad_request", "message": "Premium: допустимые периоды 3, 6 или 12 мес."}, status=400)
             if months not in PREMIUM_PRICES_RUB:
                 return _json_response({"error": "bad_request", "message": "Неверная длительность Premium"}, status=400)
             amount = float(PREMIUM_PRICES_RUB[months])
@@ -4625,14 +4702,19 @@ def setup_http_server():
                 amount_steam = float(purchase.get("amount_steam") or purchase.get("amount") or 0)
             except (TypeError, ValueError):
                 amount_steam = 0.0
-            login = (purchase.get("login") or "").strip()
-            if amount_steam < 50 or not login:
-                return _json_response({"error": "bad_request", "message": "Steam: минимум 50 ₽ и логин обязательны"}, status=400)
+            login_val, login_err = _validate_login(purchase.get("login") or "", "Логин Steam")
+            if login_err:
+                return _json_response({"error": "bad_request", "message": login_err}, status=400)
+            steam_err = _validate_steam_amount(amount_steam)
+            if steam_err:
+                return _json_response({"error": "bad_request", "message": steam_err}, status=400)
             amount_rub = round(amount_steam * _get_steam_rate_rub(), 2)
-            if amount_rub <= 0 or amount_rub > 1_000_000:
-                return _json_response({"error": "bad_request", "message": "Неверная сумма Steam"}, status=400)
+            rub_err = _validate_amount_rub(amount_rub)
+            if rub_err:
+                return _json_response({"error": "bad_request", "message": rub_err}, status=400)
             amount = float(amount_rub)
-            description = f"Пополнение Steam для {login} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
+            purchase["login"] = login_val
+            description = f"Пополнение Steam для {login_val} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
         else:
             return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium и Steam"}, status=400)
         payment_method_int = int(body.get("platega_method") or body.get("payment_method") or 10)
@@ -4871,8 +4953,15 @@ def setup_http_server():
         method = (body.get("method") or "").strip().lower()
         fk_i = int(body.get("i") or 0)
 
+        # Защита: валидация user_id
+        if not _validate_user_id(user_id):
+            return _json_response({"error": "bad_request", "message": "Некорректный user_id"}, status=400)
+
         if context != "purchase":
             return _json_response({"error": "bad_request", "message": "Только context=purchase поддерживается"}, status=400)
+
+        if method not in ("sbp", "card"):
+            return _json_response({"error": "bad_request", "message": "Допустимые методы: sbp, card"}, status=400)
 
         ptype = (purchase.get("type") or "").strip()
         amount = 0.0
@@ -4883,15 +4972,21 @@ def setup_http_server():
                 stars_amount = int(purchase.get("stars_amount") or purchase.get("starsAmount") or 0)
             except (TypeError, ValueError):
                 stars_amount = 0
-            login = (purchase.get("login") or "").strip().lstrip("@")
-            if stars_amount < 50 or stars_amount > 1_000_000 or not login:
-                return _json_response({"error": "bad_request", "message": "Звёзды: 50..1000000 и получатель обязательны"}, status=400)
+            login_val, login_err = _validate_login(purchase.get("login") or "", "Получатель")
+            if login_err:
+                return _json_response({"error": "bad_request", "message": login_err}, status=400)
+            stars_err = _validate_stars_amount(stars_amount)
+            if stars_err:
+                return _json_response({"error": "bad_request", "message": stars_err}, status=400)
             amount = round(stars_amount * STAR_PRICE_RUB, 2)
             if amount < 1:
                 amount = 1.0
-            description = f"Звёзды Telegram — {stars_amount} шт. для @{login}"
+            purchase["login"] = login_val
+            description = f"Звёзды Telegram — {stars_amount} шт. для @{login_val}"
         elif ptype == "premium":
             months = int(purchase.get("months") or 0)
+            if months not in VALIDATION_LIMITS["premium_months"]:
+                return _json_response({"error": "bad_request", "message": "Premium: допустимые периоды 3, 6 или 12 мес."}, status=400)
             if months not in PREMIUM_PRICES_RUB:
                 return _json_response({"error": "bad_request", "message": "Неверная длительность Premium"}, status=400)
             amount = float(PREMIUM_PRICES_RUB[months])
@@ -4901,14 +4996,19 @@ def setup_http_server():
                 amount_steam = float(purchase.get("amount_steam") or purchase.get("amount") or 0)
             except (TypeError, ValueError):
                 amount_steam = 0.0
-            login = (purchase.get("login") or "").strip()
-            if amount_steam < 50 or not login:
-                return _json_response({"error": "bad_request", "message": "Steam: минимум 50 ₽ и логин обязательны"}, status=400)
+            login_val, login_err = _validate_login(purchase.get("login") or "", "Логин Steam")
+            if login_err:
+                return _json_response({"error": "bad_request", "message": login_err}, status=400)
+            steam_err = _validate_steam_amount(amount_steam)
+            if steam_err:
+                return _json_response({"error": "bad_request", "message": steam_err}, status=400)
             amount_rub = round(amount_steam * _get_steam_rate_rub(), 2)
-            if amount_rub <= 0 or amount_rub > 1_000_000:
-                return _json_response({"error": "bad_request", "message": "Неверная сумма Steam"}, status=400)
+            rub_err = _validate_amount_rub(amount_rub)
+            if rub_err:
+                return _json_response({"error": "bad_request", "message": rub_err}, status=400)
             amount = float(amount_rub)
-            description = f"Пополнение Steam для {login} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
+            purchase["login"] = login_val
+            description = f"Пополнение Steam для {login_val} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
         else:
             return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium и Steam"}, status=400)
 
@@ -4926,10 +5026,9 @@ def setup_http_server():
             fk_i = 44 if method == "sbp" else 36
 
         # Наш order_id (MERCHANT_ORDER_ID / paymentId) — используем уже сгенерированный в мини‑аппе
-        # ВАЖНО: FreeKassa не принимает символ # в paymentId, поэтому убираем его перед отправкой
-        payment_id_raw = str(purchase.get("order_id") or "").strip()
-        if not payment_id_raw:
-            return _json_response({"error": "bad_request", "message": "order_id обязателен в purchase.order_id"}, status=400)
+        payment_id_raw, oid_err = _validate_order_id(str(purchase.get("order_id") or ""))
+        if oid_err:
+            return _json_response({"error": "bad_request", "message": oid_err}, status=400)
         # Убираем # из начала, если есть, и оставляем только буквы, цифры, дефисы и подчёркивания
         payment_id = payment_id_raw.lstrip("#").strip()
         # Убираем все недопустимые символы (оставляем только буквы, цифры, дефисы, подчёркивания)
@@ -5107,10 +5206,14 @@ def setup_http_server():
 
         if not order_meta:
             logger.warning("FreeKassa notify: order_meta not found for MERCHANT_ORDER_ID=%s", merchant_order_id)
+            logger.warning("FreeKassa notify: available orders in memory: %s", list((request.app.get("freekassa_orders") or {}).keys())[:10])
             return web.Response(status=200, text="YES")
 
         if order_meta.get("delivered"):
+            logger.info("FreeKassa notify: order already delivered, MERCHANT_ORDER_ID=%s", merchant_order_id)
             return web.Response(status=200, text="YES")
+        
+        logger.info("FreeKassa notify: processing order MERCHANT_ORDER_ID=%s, purchase_type=%s, user_id=%s", merchant_order_id, purchase.get("type"), user_id)
 
         purchase = order_meta.get("purchase") or {}
         ptype = (purchase.get("type") or "").strip().lower()
@@ -5141,10 +5244,12 @@ def setup_http_server():
                         _save_freekassa_order_to_file(str(merchant_order_id), order_meta)
                         import db as _db
 
-                        order_id_custom = str(purchase.get("order_id") or "").strip() or None
+                        # Используем original_order_id из order_meta (с #), если есть, иначе из purchase
+                        order_id_custom = str(order_meta.get("original_order_id") or purchase.get("order_id") or "").strip() or None
                         if _db.is_enabled():
                             await _db.user_upsert(user_id, purchase.get("username") or "", purchase.get("first_name") or "")
                             await _db.purchase_add(user_id, amount_rub, stars_amount, "stars", f"{stars_amount} звёзд", order_id_custom)
+                        logger.info("FreeKassa notify: purchase_add called for user_id=%s, order_id=%s, stars=%s", user_id, order_id_custom, stars_amount)
                         await _apply_referral_earnings_for_purchase(
                             user_id=user_id,
                             amount_rub=amount_rub,
@@ -5459,12 +5564,11 @@ def setup_http_server():
     app.router.add_post("/api/purchases/record", purchases_record_handler)
     app.router.add_route("OPTIONS", "/api/purchases/record", lambda r: Response(status=204, headers=_cors_headers()))
     
-    # Раздача статических файлов мини-аппа (index.html, script.js, style.css, assets/* и т.д.)
-    # В продакшене статику лучше обслуживать отдельным хостингом (например, GitHub Pages / Nginx),
-    # чтобы API-сервер НЕ раздавал исходники (bot.py, конфиги и т.п.).
-    #
-    # Для локальной разработки можно включить раздачу статики, установив SERVE_STATIC=1.
-    if os.getenv("SERVE_STATIC", "").strip() == "1":
+    # СТАТИКА: В продакшене НИКОГДА не включайте SERVE_STATIC!
+    # API-сервер должен отдавать только JSON API. Статику (HTML/JS/CSS) лучше на GitHub Pages / Nginx / CDN.
+    # SERVE_STATIC=1 раздаёт только каталог html/, но в проде это создаёт лишнюю поверхность атаки.
+    _serve_static = (os.environ.get("SERVE_STATIC") or "").strip().lower() in ("1", "true", "yes")
+    if _serve_static:
         # Отдаём только каталог html/, а не весь репозиторий
         static_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "html")
         if os.path.isdir(static_root):
@@ -5487,8 +5591,11 @@ async def main():
     print("   • /id - Узнать свой ID и статус")
     print("   • /users - Статистика пользователей (админы)")
     print("=" * 50)
-    print("⚠️  Чтобы стать админом, добавьте свой ID в код:")
-    print(f"    ADMIN_IDS = [6928639672]  ← замени 6928639672 на свой ID")
+    if not ADMIN_IDS:
+        print("⚠️  ADMIN_IDS не задан в env — админы не назначены")
+        print("    Укажите ADMIN_IDS=123456789 в переменных окружения Railway")
+    else:
+        print(f"👑 Админы (из ADMIN_IDS): {len(ADMIN_IDS)} ID")
     print("=" * 50)
     
     # Подключаем PostgreSQL (если задан DATABASE_URL)
