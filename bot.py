@@ -914,13 +914,13 @@ def is_admin(user_id: int) -> bool:
     return db.is_admin(user_id)
 
 def get_main_menu(language: str = 'ru'):
-    """Главное меню — синие кнопки (primary) для основных действий, красная (danger) для помощи"""
+    """Главное меню — бирюзовые кнопки (success) для основных действий, красная (danger) для помощи"""
     keyboard = [
         [
-            InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL), style="primary"),
+            InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL), style="success"),
         ],
         [
-            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp", style="primary"),
+            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp", style="success"),
         ],
         [
             InlineKeyboardButton(text="? Помощь", callback_data="help_info", style="danger"),
