@@ -4926,9 +4926,20 @@ def setup_http_server():
             fk_i = 44 if method == "sbp" else 36
 
         # Наш order_id (MERCHANT_ORDER_ID / paymentId) — используем уже сгенерированный в мини‑аппе
-        payment_id = str(purchase.get("order_id") or "").strip()
-        if not payment_id:
+        # ВАЖНО: FreeKassa не принимает символ # в paymentId, поэтому убираем его перед отправкой
+        payment_id_raw = str(purchase.get("order_id") or "").strip()
+        if not payment_id_raw:
             return _json_response({"error": "bad_request", "message": "order_id обязателен в purchase.order_id"}, status=400)
+        # Убираем # из начала, если есть, и оставляем только буквы, цифры, дефисы и подчёркивания
+        payment_id = payment_id_raw.lstrip("#").strip()
+        # Убираем все недопустимые символы (оставляем только буквы, цифры, дефисы, подчёркивания)
+        payment_id = re.sub(r'[^a-zA-Z0-9_-]', '', payment_id)
+        if not payment_id:
+            # Если после очистки ничего не осталось, генерируем новый ID из исходного
+            payment_id = payment_id_raw.lstrip("#").replace("#", "").replace(" ", "").replace("-", "_")
+            if not payment_id:
+                import time as _time
+                payment_id = f"order_{user_id}_{int(_time.time())}"
 
         # Email: реальный email клиента или Telegram ID в виде tgid@telegram.org
         email = ""
@@ -5003,19 +5014,22 @@ def setup_http_server():
                         "i": fk_i,
                         "created_at": _time.time(),
                         "delivered": False,
+                        # Сохраняем оригинальный order_id с # для отображения пользователю
+                        "original_order_id": payment_id_raw,
                     }
                     try:
                         orders_fk = request.app.get("freekassa_orders")
                         if isinstance(orders_fk, dict):
+                            # Сохраняем с очищенным payment_id (без #) как ключ, чтобы вебхук мог найти
                             orders_fk[str(payment_id)] = order_meta
                     except Exception:
                         pass
                     _save_freekassa_order_to_file(str(payment_id), order_meta)
-                    logger.info("FreeKassa order created: merchant_order_id=%s, fk_order_id=%s, amount=%s", payment_id, order_id_fk, amount)
+                    logger.info("FreeKassa order created: paymentId=%s (original=%s), fk_order_id=%s, amount=%s", payment_id, payment_id_raw, order_id_fk, amount)
                     return _json_response(
                         {
                             "success": True,
-                            "order_id": payment_id,
+                            "order_id": payment_id_raw,  # Возвращаем оригинальный order_id с # для фронтенда
                             "fk_order_id": order_id_fk,
                             "payment_url": location,
                         }
