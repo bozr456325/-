@@ -5402,16 +5402,30 @@ def setup_http_server():
             amount_value = 0.01
         nonce_value = int((_time.time() + 10800) * 1000)
         
+        # Валидация данных перед отправкой
+        if not email or "@" not in email:
+            logger.error("FreeKassa: invalid email: %s", email)
+            return _json_response({"error": "bad_request", "message": "Некорректный email"}, status=400)
+        if not ip or len(ip.strip()) == 0:
+            logger.error("FreeKassa: invalid IP: %s", ip)
+            return _json_response({"error": "bad_request", "message": "Некорректный IP"}, status=400)
+        if not payment_id or len(payment_id.strip()) == 0:
+            logger.error("FreeKassa: invalid paymentId: %s", payment_id)
+            return _json_response({"error": "bad_request", "message": "Некорректный paymentId"}, status=400)
+        
         data = {
             "shopId": shop_id_int,
             "nonce": nonce_value,
-            "paymentId": payment_id,
+            "paymentId": str(payment_id).strip(),  # Убеждаемся, что это строка
             "i": int(fk_i),
-            "email": email,
-            "ip": ip,
-            "amount": amount_value,  # Число с десятичными знаками
+            "email": str(email).strip(),
+            "ip": str(ip).strip(),
+            "amount": float(amount_value),  # Число с десятичными знаками
             "currency": "RUB",
         }
+        
+        logger.info("FreeKassa data validation: shopId=%d, paymentId=%s, email=%s, ip=%s, amount=%.2f, i=%d", 
+                   shop_id_int, payment_id, email, ip, amount_value, fk_i)
         
         # Проверяем, что API ключ не пустой
         if not FREEKASSA_API_KEY or len(FREEKASSA_API_KEY.strip()) == 0:
@@ -5444,18 +5458,31 @@ def setup_http_server():
         logger.debug("FreeKassa full data (without signature): %s", {k: v for k, v in data.items() if k != "signature"})
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post("https://api.fk.life/v1/orders/create", json=data) as resp:
-                    text = await resp.text()
-                    try:
-                        resp_data = json.loads(text) if text else {}
-                    except json.JSONDecodeError:
-                        logger.warning("FreeKassa create-order: response not JSON, status=%s, body=%s", resp.status, text[:300])
-                        return _json_response({"error": "freekassa_error", "message": f"Ответ не JSON: {text[:200]}"}, status=502)
-                    if resp.status != 200 or (resp_data.get("type") or "").lower() != "success":
-                        err = resp_data.get("message") or resp_data.get("error") or text[:300]
-                        logger.warning("FreeKassa create-order failed: status=%s, body=%s", resp.status, text[:500])
-                        return _json_response({"error": "freekassa_error", "message": str(err)}, status=502)
+            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                logger.info("FreeKassa: Sending request to https://api.fk.life/v1/orders/create")
+                logger.debug("FreeKassa request data: %s", json.dumps({k: v for k, v in data.items() if k != "signature"}, ensure_ascii=False))
+                try:
+                    async with session.post("https://api.fk.life/v1/orders/create", json=data, headers={"Content-Type": "application/json"}) as resp:
+                        text = await resp.text()
+                        logger.info("FreeKassa response: status=%d, headers=%s", resp.status, dict(resp.headers))
+                        logger.debug("FreeKassa response body: %s", text[:500])
+                        try:
+                            resp_data = json.loads(text) if text else {}
+                        except json.JSONDecodeError:
+                            logger.error("FreeKassa create-order: response not JSON, status=%s, body=%s", resp.status, text[:500])
+                            return _json_response({"error": "freekassa_error", "message": f"Ответ не JSON: {text[:200]}"}, status=502)
+                        if resp.status != 200 or (resp_data.get("type") or "").lower() != "success":
+                            err = resp_data.get("message") or resp_data.get("error") or text[:300]
+                            logger.error("FreeKassa create-order failed: status=%d, type=%s, message=%s, full_response=%s", 
+                                       resp.status, resp_data.get("type"), err, text[:1000])
+                            return _json_response({"error": "freekassa_error", "message": str(err)}, status=502)
+                except asyncio.TimeoutError:
+                    logger.error("FreeKassa create-order: timeout waiting for response")
+                    return _json_response({"error": "freekassa_error", "message": "Таймаут при обращении к FreeKassa API"}, status=504)
+                except aiohttp.ClientError as e:
+                    logger.error("FreeKassa create-order: client error: %s", e, exc_info=True)
+                    return _json_response({"error": "freekassa_error", "message": f"Ошибка сети: {str(e)}"}, status=502)
                     order_id_fk = resp_data.get("orderId")
                     location = resp_data.get("location") or ""
                     if not location:
