@@ -5469,8 +5469,8 @@ def setup_http_server():
                 # По документации: POST запрос с JSON телом на https://api.fk.life/v1/orders/create
                 url = "https://api.fk.life/v1/orders/create"
                 logger.info("FreeKassa: Sending POST request to %s", url)
+                logger.info("FreeKassa request data (without signature): %s", json.dumps({k: v for k, v in data.items() if k != "signature"}, ensure_ascii=False))
                 logger.debug("FreeKassa request data (full): %s", json.dumps(data, ensure_ascii=False))
-                logger.debug("FreeKassa request data (without signature): %s", json.dumps({k: v for k, v in data.items() if k != "signature"}, ensure_ascii=False))
                 try:
                     async with session.post(url, json=data, headers={"Content-Type": "application/json"}) as resp:
                         text = await resp.text()
@@ -5486,51 +5486,55 @@ def setup_http_server():
                             logger.error("FreeKassa create-order failed: status=%d, type=%s, message=%s, full_response=%s", 
                                        resp.status, resp_data.get("type"), err, text[:1000])
                             return _json_response({"error": "freekassa_error", "message": str(err)}, status=502)
+                        
+                        # Успешный ответ от FreeKassa
+                        order_id_fk = resp_data.get("orderId")
+                        location = resp_data.get("location") or ""
+                        if not location:
+                            # В некоторых реализациях URL может приходить как plain text
+                            if isinstance(resp_data, str) and resp_data.startswith("http"):
+                                location = resp_data
+                        if not location:
+                            logger.error("FreeKassa: no location in response: %s", resp_data)
+                            return _json_response({"error": "freekassa_error", "message": "Не получена ссылка на оплату (location)"}, status=502)
+                        
+                        # Обработка успешного ответа
+                        order_meta = {
+                            "context": context,
+                            "user_id": user_id,
+                            "amount_rub": float(amount),
+                            "purchase": dict(purchase),
+                            "fk_order_id": order_id_fk,
+                            "method": method,
+                            "i": fk_i,
+                            "created_at": _time.time(),
+                            "delivered": False,
+                            # Сохраняем оригинальный order_id с # для отображения пользователю
+                            "original_order_id": payment_id_raw,
+                        }
+                        try:
+                            orders_fk = request.app.get("freekassa_orders")
+                            if isinstance(orders_fk, dict):
+                                # Сохраняем с очищенным payment_id (без #) как ключ, чтобы вебхук мог найти
+                                orders_fk[str(payment_id)] = order_meta
+                        except Exception:
+                            pass
+                        _save_freekassa_order_to_file(str(payment_id), order_meta)
+                        logger.info("FreeKassa order created: paymentId=%s (original=%s), fk_order_id=%s, amount=%s", payment_id, payment_id_raw, order_id_fk, amount)
+                        return _json_response(
+                            {
+                                "success": True,
+                                "order_id": payment_id_raw,  # Возвращаем оригинальный order_id с # для фронтенда
+                                "fk_order_id": order_id_fk,
+                                "payment_url": location,
+                            }
+                        )
                 except asyncio.TimeoutError:
                     logger.error("FreeKassa create-order: timeout waiting for response")
                     return _json_response({"error": "freekassa_error", "message": "Таймаут при обращении к FreeKassa API"}, status=504)
                 except aiohttp.ClientError as e:
                     logger.error("FreeKassa create-order: client error: %s", e, exc_info=True)
                     return _json_response({"error": "freekassa_error", "message": f"Ошибка сети: {str(e)}"}, status=502)
-                    order_id_fk = resp_data.get("orderId")
-                    location = resp_data.get("location") or ""
-                    if not location:
-                        # В некоторых реализациях URL может приходить как plain text
-                        if isinstance(resp_data, str) and resp_data.startswith("http"):
-                            location = resp_data
-                    if not location:
-                        return _json_response({"error": "freekassa_error", "message": "Не получена ссылка на оплату (location)"}, status=502)
-
-                    order_meta = {
-                        "context": context,
-                        "user_id": user_id,
-                        "amount_rub": float(amount),
-                        "purchase": dict(purchase),
-                        "fk_order_id": order_id_fk,
-                        "method": method,
-                        "i": fk_i,
-                        "created_at": _time.time(),
-                        "delivered": False,
-                        # Сохраняем оригинальный order_id с # для отображения пользователю
-                        "original_order_id": payment_id_raw,
-                    }
-                    try:
-                        orders_fk = request.app.get("freekassa_orders")
-                        if isinstance(orders_fk, dict):
-                            # Сохраняем с очищенным payment_id (без #) как ключ, чтобы вебхук мог найти
-                            orders_fk[str(payment_id)] = order_meta
-                    except Exception:
-                        pass
-                    _save_freekassa_order_to_file(str(payment_id), order_meta)
-                    logger.info("FreeKassa order created: paymentId=%s (original=%s), fk_order_id=%s, amount=%s", payment_id, payment_id_raw, order_id_fk, amount)
-                    return _json_response(
-                        {
-                            "success": True,
-                            "order_id": payment_id_raw,  # Возвращаем оригинальный order_id с # для фронтенда
-                            "fk_order_id": order_id_fk,
-                            "payment_url": location,
-                        }
-                    )
         except aiohttp.ClientError as e:
             logger.error("FreeKassa create-order network error: %s", e)
             return _json_response({"error": "network_error", "message": str(e)}, status=502)
