@@ -313,12 +313,18 @@ def _save_json_file(path: str, data: dict) -> None:
 # Глобальный помощник: поиск заказа по нашему кастомному order_id (#ABC123)
 _CRYPTOBOT_ORDERS_FILE_GLOBAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cryptobot_orders.json")
 _PLATEGA_ORDERS_FILE_GLOBAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platega_orders.json")
+_FREEKASSA_ORDERS_FILE_GLOBAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "freekassa_orders.json")
 
 
 async def _find_order_by_custom_id(order_id: str) -> Optional[tuple]:
     """
-    Ищет заказ по кастомному order_id (#ABC123) в cryptobot_orders.json и platega_orders.json.
-    Возвращает (source, order_key, meta): source = 'cryptobot'|'platega', order_key = invoice_id или transaction_id.
+    Ищет заказ по кастомному order_id (#ABC123) в:
+      - cryptobot_orders.json
+      - platega_orders.json
+      - freekassa_orders.json
+    Возвращает (source, order_key, meta):
+      source = 'cryptobot' | 'platega' | 'freekassa'
+      order_key = invoice_id / transaction_id / внутренний ID FreeKassa.
     """
     oid = (order_id or "").strip().upper()
     if not oid:
@@ -326,6 +332,7 @@ async def _find_order_by_custom_id(order_id: str) -> Optional[tuple]:
     if not oid.startswith("#"):
         oid = "#" + oid
     try:
+        # CryptoBot: ищем в purchase.order_id
         data = _read_json_file(_CRYPTOBOT_ORDERS_FILE_GLOBAL) or {}
         if isinstance(data, dict):
             for inv_id, meta in data.items():
@@ -334,6 +341,8 @@ async def _find_order_by_custom_id(order_id: str) -> Optional[tuple]:
                 purchase_meta = meta.get("purchase") or {}
                 if str(purchase_meta.get("order_id") or "").upper() == oid:
                     return ("cryptobot", str(inv_id), meta)
+
+        # Platega: тоже ищем по purchase.order_id
         data = _read_json_file(_PLATEGA_ORDERS_FILE_GLOBAL) or {}
         if isinstance(data, dict):
             for tx_id, meta in data.items():
@@ -342,6 +351,20 @@ async def _find_order_by_custom_id(order_id: str) -> Optional[tuple]:
                 purchase_meta = meta.get("purchase") or {}
                 if str(purchase_meta.get("order_id") or "").upper() == oid:
                     return ("platega", str(tx_id), meta)
+
+        # FreeKassa: order_id у нас хранится в meta.original_order_id (с #),
+        # ключом в файле является очищенный payment_id без #.
+        data = _read_json_file(_FREEKASSA_ORDERS_FILE_GLOBAL) or {}
+        if isinstance(data, dict):
+            for fk_key, meta in data.items():
+                if not isinstance(meta, dict):
+                    continue
+                # Пытаемся сопоставить как с original_order_id, так и с purchase.order_id (на будущее)
+                orig = str(meta.get("original_order_id") or "").upper()
+                purchase_meta = meta.get("purchase") or {}
+                poid = str(purchase_meta.get("order_id") or "").upper()
+                if orig == oid or poid == oid:
+                    return ("freekassa", str(fk_key), meta)
     except Exception as e:
         logger.warning(f"_find_order_by_custom_id error: {e}")
     return None
@@ -703,13 +726,14 @@ class Database:
             'welcome_text_ru': '👋 <b>Добро пожаловать в Jet Store!</b>\n⚡ Покупай и управляй цифровыми товарами прямо в Telegram.\n \nВыберите действие:',
             'welcome_text_en': '👋 <b>Welcome to Jet Store!</b>\n\nChoose action:',
             'welcome_photo': None,
-            'about_text_ru': '''<b>🌟 О сервисе Jet Store</b>
+            # Используем premium‑эмодзи 💡 (tg://emoji?id=5422439311196834318) для блока "О нас"
+            'about_text_ru': '''<b><tg-emoji emoji-id="5422439311196834318">💡</tg-emoji> О сервисе Jet Store</b>
 
 Мы предоставляем:
 • ⭐️ <b>Покупку звёзд</b>
 • 🎡 <b>Участие в рулетке</b>
 • 🗂️ <b>Каталог цифровых товаров</b>''',
-            'about_text_en': '''<b>🌟 About Jet Store Service</b>
+            'about_text_en': '''<b><tg-emoji emoji-id="5422439311196834318">💡</tg-emoji> About Jet Store Service</b>
 
 We provide:
 • ⭐️ <b>Star purchase</b>
@@ -939,7 +963,8 @@ def get_main_menu(language: str = 'ru'):
             InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL), style="primary"),
         ],
         [
-            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp", style="primary"),
+            # Премиум‑эмодзи для подписки на канал: 🔵 (tg://emoji?id=5017077798129369907)
+            InlineKeyboardButton(text="🔵 Подписаться на канал", url="https://t.me/JetStoreApp", style="primary"),
         ],
         [
             InlineKeyboardButton(text="? Помощь", callback_data="help_info", style="danger"),
@@ -1618,7 +1643,14 @@ async def process_admin_order_search(message: types.Message, state: FSMContext):
         status_lines.append("⏳ <b>Оплата подтверждена, выдача ещё не завершена</b>")
     status_lines.append(f"💵 Сумма: <b>{float(amount_rub or 0):.2f} ₽</b>")
     
-    id_label = "Invoice ID (CryptoBot):" if source == "cryptobot" else "Transaction ID (Platega):"
+    if source == "cryptobot":
+        id_label = "Invoice ID (CryptoBot):"
+    elif source == "platega":
+        id_label = "Transaction ID (Platega):"
+    elif source == "freekassa":
+        id_label = "Внутренний ID заказа FreeKassa:"
+    else:
+        id_label = "Внутренний ID заказа:"
     text_lines = [
         f"🔎 <b>Информация по заказу {raw_id}</b>",
         "",
