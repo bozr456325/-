@@ -963,8 +963,7 @@ def get_main_menu(language: str = 'ru'):
             InlineKeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=WEB_APP_URL), style="primary"),
         ],
         [
-            # Премиум‑эмодзи для подписки на канал: 🔵 (tg://emoji?id=5017077798129369907)
-            InlineKeyboardButton(text="🔵 Подписаться на канал", url="https://t.me/JetStoreApp", style="primary"),
+            InlineKeyboardButton(text="📰 Подписаться на канал", url="https://t.me/JetStoreApp", style="primary"),
         ],
         [
             InlineKeyboardButton(text="? Помощь", callback_data="help_info", style="danger"),
