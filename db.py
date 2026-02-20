@@ -314,18 +314,31 @@ async def rating_set(user_id: str, show: bool):
 async def rates_get() -> dict:
     """Получить все курсы из БД. key -> value (float)."""
     if not _db_enabled:
+        logger.debug("rates_get: DB not enabled, returning empty dict")
         return {}
-    async with _pool.acquire() as conn:
-        rows = await conn.fetch("SELECT key, value FROM app_rates")
-    return {r["key"]: float(r["value"]) for r in rows if r["value"] is not None}
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch("SELECT key, value FROM app_rates")
+        result = {r["key"]: float(r["value"]) for r in rows if r["value"] is not None}
+        logger.debug(f"rates_get: Retrieved {len(result)} rates from DB: {list(result.keys())}")
+        return result
+    except Exception as e:
+        logger.error(f"rates_get error: {e}", exc_info=True)
+        return {}
 
 
 async def rates_set(key: str, value: float):
     """Установить курс. key: star_price_rub, star_buy_rate_rub, steam_rate_rub, premium_3, premium_6, premium_12."""
     if not _db_enabled:
+        logger.warning(f"rates_set: DB not enabled, cannot save {key}={value}")
         return
-    async with _pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO app_rates (key, value) VALUES ($1, $2)
-            ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
-        """, key, value)
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO app_rates (key, value) VALUES ($1, $2)
+                ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
+            """, key, value)
+            logger.info(f"rates_set: Saved {key}={value} to PostgreSQL")
+    except Exception as e:
+        logger.error(f"rates_set error for {key}={value}: {e}", exc_info=True)
+        raise

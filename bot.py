@@ -2531,9 +2531,16 @@ def setup_http_server():
                 import db as _db_rates
                 if _db_rates.is_enabled():
                     await _db_rates.rates_set("steam_rate_rub", rate)
-                    logger.info(f"Saved steam_rate_rub={rate} to DB")
+                    saved_rates = await _db_rates.rates_get()
+                    saved_value = saved_rates.get("steam_rate_rub")
+                    if saved_value == rate:
+                        logger.info(f"✓ Saved steam_rate_rub={rate} to DB and verified")
+                    else:
+                        logger.error(f"✗ Failed to save steam_rate_rub: expected {rate}, got {saved_value}")
+                else:
+                    logger.warning("PostgreSQL not enabled, steam_rate_rub not saved to DB")
             except Exception as e:
-                logger.warning(f"rates_set steam_rate_rub error: {e}")
+                logger.error(f"rates_set steam_rate_rub error: {e}", exc_info=True)
             return _json_response({"steam_rate_rub": _steam_rate_rub_override})
         try:
             rate = _get_steam_rate_rub()
@@ -2566,9 +2573,17 @@ def setup_http_server():
                             import db as _db_rates
                             if _db_rates.is_enabled():
                                 await _db_rates.rates_set("star_price_rub", r)
-                                logger.info(f"Saved star_price_rub={r} to DB")
+                                # Проверяем, что курс действительно сохранился
+                                saved_rates = await _db_rates.rates_get()
+                                saved_value = saved_rates.get("star_price_rub")
+                                if saved_value == r:
+                                    logger.info(f"✓ Saved star_price_rub={r} to DB and verified")
+                                else:
+                                    logger.error(f"✗ Failed to save star_price_rub: expected {r}, got {saved_value}")
+                            else:
+                                logger.warning("PostgreSQL not enabled, star_price_rub not saved to DB")
                         except Exception as e:
-                            logger.warning(f"rates_set star_price_rub error: {e}")
+                            logger.error(f"rates_set star_price_rub error: {e}", exc_info=True)
                 except (TypeError, ValueError):
                     pass
             v = body.get("star_buy_rate_rub")
@@ -2582,9 +2597,16 @@ def setup_http_server():
                             import db as _db_rates
                             if _db_rates.is_enabled():
                                 await _db_rates.rates_set("star_buy_rate_rub", r)
-                                logger.info(f"Saved star_buy_rate_rub={r} to DB")
+                                saved_rates = await _db_rates.rates_get()
+                                saved_value = saved_rates.get("star_buy_rate_rub")
+                                if saved_value == r:
+                                    logger.info(f"✓ Saved star_buy_rate_rub={r} to DB and verified")
+                                else:
+                                    logger.error(f"✗ Failed to save star_buy_rate_rub: expected {r}, got {saved_value}")
+                            else:
+                                logger.warning("PostgreSQL not enabled, star_buy_rate_rub not saved to DB")
                         except Exception as e:
-                            logger.warning(f"rates_set star_buy_rate_rub error: {e}")
+                            logger.error(f"rates_set star_buy_rate_rub error: {e}", exc_info=True)
                 except (TypeError, ValueError):
                     pass
             if updated:
@@ -5250,22 +5272,40 @@ def setup_http_server():
         try:
             import db as _db_pg
             db_enabled = _db_pg.is_enabled()
+            logger.info(f"FreeKassa: DB enabled={db_enabled}")
             if db_enabled:
                 rates_db = await _db_pg.rates_get()
                 logger.info(f"FreeKassa: rates from DB: {rates_db}")
+            else:
+                logger.warning("FreeKassa: PostgreSQL not enabled, using file/env rates")
         except Exception as e:
-            logger.warning(f"FreeKassa rates_get error: {e}")
-        # Используем курс из БД, если есть и > 0, иначе fallback
+            logger.error(f"FreeKassa rates_get error: {e}", exc_info=True)
+        
+        # Используем курс из БД, если есть и > 0, иначе fallback на файл/env
         star_from_db = rates_db.get("star_price_rub")
         steam_from_db = rates_db.get("steam_rate_rub")
-        _star = float(star_from_db) if star_from_db is not None and float(star_from_db) > 0 else _get_star_price_rub()
-        _steam = float(steam_from_db) if steam_from_db is not None and float(steam_from_db) > 0 else _get_steam_rate_rub()
+        star_fallback = _get_star_price_rub()
+        steam_fallback = _get_steam_rate_rub()
+        
+        _star = float(star_from_db) if star_from_db is not None and float(star_from_db) > 0 else star_fallback
+        _steam = float(steam_from_db) if steam_from_db is not None and float(steam_from_db) > 0 else steam_fallback
+        
+        if star_from_db is not None:
+            logger.info(f"FreeKassa: Using star_rate from DB: {star_from_db} (fallback was: {star_fallback})")
+        else:
+            logger.warning(f"FreeKassa: No star_rate in DB, using fallback: {star_fallback}")
+        
+        if steam_from_db is not None:
+            logger.info(f"FreeKassa: Using steam_rate from DB: {steam_from_db} (fallback was: {steam_fallback})")
+        else:
+            logger.warning(f"FreeKassa: No steam_rate in DB, using fallback: {steam_fallback}")
+        
         _premium = {
             3: float(rates_db.get("premium_3")) if rates_db.get("premium_3") is not None and float(rates_db.get("premium_3", 0)) > 0 else PREMIUM_PRICES_RUB.get(3, 983),
             6: float(rates_db.get("premium_6")) if rates_db.get("premium_6") is not None and float(rates_db.get("premium_6", 0)) > 0 else PREMIUM_PRICES_RUB.get(6, 1311),
             12: float(rates_db.get("premium_12")) if rates_db.get("premium_12") is not None and float(rates_db.get("premium_12", 0)) > 0 else PREMIUM_PRICES_RUB.get(12, 2377)
         }
-        logger.info(f"FreeKassa create-order: ptype={ptype}, DB enabled={db_enabled}, star_rate={_star}, steam_rate={_steam}")
+        logger.info(f"FreeKassa create-order: ptype={ptype}, DB enabled={db_enabled}, final star_rate={_star}, final steam_rate={_steam}")
 
         if ptype == "stars":
             try:
