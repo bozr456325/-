@@ -4264,6 +4264,26 @@ def setup_http_server():
                                                         star_err,
                                                     )
 
+                                        elif ptype == "spin":
+                                            order_meta["delivered"] = True
+                                            try:
+                                                orders = request.app.get("cryptobot_orders")
+                                                if isinstance(orders, dict):
+                                                    orders[str(invoice_id)]["delivered"] = True
+                                            except Exception:
+                                                pass
+                                            _save_cryptobot_order_to_file(str(invoice_id), order_meta)
+                                            try:
+                                                await _apply_referral_earnings_for_purchase(
+                                                    user_id=str(order_meta.get("user_id") or "unknown"),
+                                                    amount_rub=float(order_meta.get("amount_rub") or 100),
+                                                    username=purchase_meta.get("username") or "",
+                                                    first_name=purchase_meta.get("first_name") or "",
+                                                )
+                                            except Exception as ref_err:
+                                                logger.warning("Failed to apply referral earnings (payment_check spin): %s", ref_err)
+                                            logger.info("CryptoBot payment_check: spin delivered, invoice_id=%s", invoice_id)
+
                                     return _json_response(response_data)
             except Exception as e:
                 logger.warning(f"Crypto Pay check invoice {invoice_id}: {e}")
@@ -4554,9 +4574,22 @@ def setup_http_server():
                     },
                     ensure_ascii=False,
                 )[:4096]
+            elif ptype == "spin":
+                amount = 1.5  # 1.5 USDT
+                description = "1 спин рулетки — 1.5 USDT"
+                payload_data = json.dumps(
+                    {
+                        "context": "purchase",
+                        "type": "spin",
+                        "user_id": user_id,
+                        "amount_usdt": 1.5,
+                        "timestamp": time.time(),
+                    },
+                    ensure_ascii=False,
+                )[:4096]
             else:
                 return _json_response(
-                    {"error": "bad_request", "message": "Поддерживаются только покупки звёзд, Premium и Steam"}, status=400
+                    {"error": "bad_request", "message": "Поддерживаются только покупки звёзд, Premium, Steam и спин рулетки"}, status=400
                 )
 
         # ----------- Пополнение баланса (депозит) -----------
@@ -4585,7 +4618,7 @@ def setup_http_server():
                 ensure_ascii=False,
             )[:4096]
 
-        # Комиссия CryptoBot 4% — сумма к оплате увеличивается
+        # Комиссия CryptoBot 4% — сумма к оплате увеличивается (для spin в USDT тоже)
         CRYPTOBOT_COMMISSION_PERCENT = 4.0
         amount = round(amount * (1 + CRYPTOBOT_COMMISSION_PERCENT / 100), 2)
 
@@ -4598,16 +4631,28 @@ def setup_http_server():
         except Exception:
             pass
 
-        payload_obj = {
-            "currency_type": "fiat",
-            "fiat": "RUB",
-            "amount": f"{amount:.2f}",
-            "description": description[:1024],
-            "accepted_assets": "USDT,TON,BTC,ETH,TRX,USDC",
-            "payload": payload_data,
-            "paid_btn_name": "callback",
-            "paid_btn_url": paid_btn_url,
-        }
+        # Spin в USDT: currency_type crypto, иначе fiat RUB
+        if ptype == "spin":
+            payload_obj = {
+                "currency_type": "crypto",
+                "asset": "USDT",
+                "amount": f"{amount:.2f}",
+                "description": description[:1024],
+                "payload": payload_data,
+                "paid_btn_name": "callback",
+                "paid_btn_url": paid_btn_url,
+            }
+        else:
+            payload_obj = {
+                "currency_type": "fiat",
+                "fiat": "RUB",
+                "amount": f"{amount:.2f}",
+                "description": description[:1024],
+                "accepted_assets": "USDT,TON,BTC,ETH,TRX,USDC",
+                "payload": payload_data,
+                "paid_btn_name": "callback",
+                "paid_btn_url": paid_btn_url,
+            }
         headers = {
             "Content-Type": "application/json",
             "Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN,
@@ -4656,10 +4701,11 @@ def setup_http_server():
                     # Сохраняем метаданные инвойса на стороне сервера,
                     # чтобы не доверять данным из клиента при последующей проверке оплаты.
                     try:
+                        amt_rub = 100.0 if (context == "purchase" and (purchase or {}).get("type") == "spin") else float(amount)
                         order_meta = {
                                 "context": context,
                                 "user_id": user_id,
-                                "amount_rub": float(amount),
+                                "amount_rub": amt_rub,
                                 "purchase": purchase if context == "purchase" else None,
                                 "created_at": time.time(),
                                 "delivered": False,
@@ -4947,6 +4993,23 @@ def setup_http_server():
                             user_id,
                             amount_rub,
                         )
+                
+                elif purchase_type == "spin":
+                    order_meta["delivered"] = True
+                    if isinstance(orders, dict):
+                        orders[str(invoice_id)]["delivered"] = True
+                    _save_cryptobot_order_to_file(str(invoice_id), order_meta)
+                    amount_rub_spin = float(order_meta.get("amount_rub") or 100)  # 1 USDT ≈ 100 RUB
+                    try:
+                        await _apply_referral_earnings_for_purchase(
+                            user_id=user_id,
+                            amount_rub=amount_rub_spin,
+                            username=purchase.get("username") or "",
+                            first_name=purchase.get("first_name") or "",
+                        )
+                    except Exception as ref_err:
+                        logger.warning(f"Failed to update referral earnings (webhook spin): {ref_err}")
+                    logger.info("CryptoBot webhook: spin delivered, invoice_id=%s, user_id=%s", invoice_id, user_id)
                 
                 elif purchase_type == "steam":
                     # Пополнение Steam: выдача через FunPay‑бота (отдельный сервис)
@@ -5456,8 +5519,11 @@ def setup_http_server():
             amount = float(amount_rub)
             purchase["login"] = login_val
             description = f"Пополнение Steam для {login_val} на {amount_steam:.0f} ₽ (к оплате {amount:.2f} ₽)"
+        elif ptype == "spin":
+            amount = 100.0
+            description = "1 спин рулетки — 100 ₽"
         else:
-            return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium и Steam"}, status=400)
+            return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium, Steam и спин рулетки"}, status=400)
 
         # FreeKassa сама добавляет комиссию (СБП ~5%, карты ~6%) — в amount передаём чистую сумму без надбавки
         if fk_i not in (36, 44, 43):
@@ -5798,6 +5864,22 @@ def setup_http_server():
                     first_name=purchase.get("first_name") or "",
                 )
                 logger.info("FreeKassa notify: premium recorded, MERCHANT_ORDER_ID=%s", merchant_order_id)
+            elif ptype == "spin":
+                order_meta["delivered"] = True
+                try:
+                    orders_fk = request.app.get("freekassa_orders")
+                    if isinstance(orders_fk, dict):
+                        orders_fk[str(merchant_order_id)] = order_meta
+                except Exception:
+                    pass
+                _save_freekassa_order_to_file(str(merchant_order_id), order_meta)
+                await _apply_referral_earnings_for_purchase(
+                    user_id=user_id,
+                    amount_rub=amount_rub,
+                    username=purchase.get("username") or "",
+                    first_name=purchase.get("first_name") or "",
+                )
+                logger.info("FreeKassa notify: spin delivered, MERCHANT_ORDER_ID=%s", merchant_order_id)
             elif ptype == "steam":
                 account = (purchase.get("login") or "").strip()
                 amount_steam = purchase.get("amount_steam") or purchase.get("amount") or amount_rub
