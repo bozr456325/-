@@ -5522,8 +5522,19 @@ def setup_http_server():
         elif ptype == "spin":
             amount = 100.0
             description = "1 спин рулетки — 100 ₽"
+        elif ptype == "balance":
+            try:
+                amount = float(purchase.get("amount") or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            if amount < 100:
+                return _json_response({"error": "bad_request", "message": "Минимальная сумма пополнения баланса 100 ₽"}, status=400)
+            if amount > 100_000:
+                return _json_response({"error": "bad_request", "message": "Максимальная сумма пополнения 100 000 ₽"}, status=400)
+            amount = round(amount, 2)
+            description = f"Пополнение баланса JET Store на {amount:.0f} ₽"
         else:
-            return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium, Steam и спин рулетки"}, status=400)
+            return _json_response({"error": "bad_request", "message": "Поддерживаются только звёзды, Premium, Steam, спин рулетки и пополнение баланса"}, status=400)
 
         # FreeKassa сама добавляет комиссию (СБП ~5%, карты ~6%) — в amount передаём чистую сумму без надбавки
         if fk_i not in (36, 44, 43):
@@ -5880,6 +5891,16 @@ def setup_http_server():
                     first_name=purchase.get("first_name") or "",
                 )
                 logger.info("FreeKassa notify: spin delivered, MERCHANT_ORDER_ID=%s", merchant_order_id)
+            elif ptype == "balance":
+                order_meta["delivered"] = True
+                try:
+                    orders_fk = request.app.get("freekassa_orders")
+                    if isinstance(orders_fk, dict):
+                        orders_fk[str(merchant_order_id)] = order_meta
+                except Exception:
+                    pass
+                _save_freekassa_order_to_file(str(merchant_order_id), order_meta)
+                logger.info("FreeKassa notify: balance deposit delivered, MERCHANT_ORDER_ID=%s, amount_rub=%s", merchant_order_id, amount_rub)
             elif ptype == "steam":
                 account = (purchase.get("login") or "").strip()
                 amount_steam = purchase.get("amount_steam") or purchase.get("amount") or amount_rub
