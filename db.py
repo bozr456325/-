@@ -112,7 +112,17 @@ async def _ensure_schema():
             )
         """)
         logger.info("PostgreSQL: ensured table 'app_rates'")
-    logger.info("Схема PostgreSQL проверена (users, purchases, referrals, rating_prefs, app_rates)")
+        # Балансы пользователей (источник правды; изменения только на сервере)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_balances (
+                user_id TEXT PRIMARY KEY,
+                balance_rub NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK (balance_rub >= 0),
+                balance_usdt NUMERIC(12,6) NOT NULL DEFAULT 0 CHECK (balance_usdt >= 0),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("PostgreSQL: ensured table 'user_balances'")
+    logger.info("Схема PostgreSQL проверена (users, purchases, referrals, rating_prefs, app_rates, user_balances)")
 
 
 # --- Referrals ---
@@ -261,28 +271,54 @@ async def purchase_add(user_id: str, amount_rub: float, stars_amount: int, ptype
 
 
 async def get_users_with_purchases() -> dict:
-    """Все пользователи с покупками (для рейтинга). user_id -> {username, first_name, purchases: [...]}"""
+    """Все пользователи с покупками (для рейтинга и статистики). user_id -> {username, first_name, registration_date, last_activity, purchases: [...]}"""
     if not _db_enabled:
         return {}
     async with _pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT u.id, u.username, u.first_name, p.id as pid, p.amount_rub, p.stars_amount, p.type, p.product_name, p.created_at
-            FROM users u
-            JOIN purchases p ON p.user_id = u.id
-            ORDER BY p.created_at DESC
+        # Сначала получаем всех пользователей с датами регистрации
+        user_rows = await conn.fetch("SELECT id, username, first_name, created_at FROM users")
+        users = {}
+        for ur in user_rows:
+            uid = ur["id"]
+            users[uid] = {
+                "username": ur["username"] or "",
+                "first_name": ur["first_name"] or "",
+                "registration_date": ur["created_at"].strftime("%Y-%m-%d %H:%M:%S") if ur["created_at"] else "",
+                "created_at": ur["created_at"].strftime("%Y-%m-%d %H:%M:%S") if ur["created_at"] else "",
+                "last_activity": "",  # Будет обновлено из последней покупки
+                "purchases": []
+            }
+        
+        # Затем получаем покупки
+        purchase_rows = await conn.fetch("""
+            SELECT user_id, amount_rub, stars_amount, type, product_name, created_at
+            FROM purchases
+            ORDER BY created_at DESC
         """)
-    users = {}
-    for r in rows:
-        uid = r["id"]
-        if uid not in users:
-            users[uid] = {"username": r["username"] or "", "first_name": r["first_name"] or "", "purchases": []}
-        users[uid]["purchases"].append({
-            "amount": float(r["amount_rub"]),
-            "stars_amount": r["stars_amount"] or 0,
-            "type": r["type"] or "stars",
-            "productName": r["product_name"] or "",
-            "date": r["created_at"].strftime("%Y-%m-%d %H:%M:%S") if r["created_at"] else "",
-        })
+        
+        for pr in purchase_rows:
+            uid = pr["user_id"]
+            if uid not in users:
+                users[uid] = {"username": "", "first_name": "", "registration_date": "", "created_at": "", "last_activity": "", "purchases": []}
+            purchase_date = pr["created_at"].strftime("%Y-%m-%d %H:%M:%S") if pr["created_at"] else ""
+            users[uid]["purchases"].append({
+                "amount": float(pr["amount_rub"]),
+                "amount_rub": float(pr["amount_rub"]),
+                "stars_amount": pr["stars_amount"] or 0,
+                "type": pr["type"] or "stars",
+                "productName": pr["product_name"] or "",
+                "date": purchase_date,
+                "created_at": purchase_date,
+            })
+            # Обновляем last_activity самой свежей покупкой
+            if purchase_date and (not users[uid]["last_activity"] or purchase_date > users[uid]["last_activity"]):
+                users[uid]["last_activity"] = purchase_date
+        
+        # Если у пользователя нет покупок, но есть регистрация — last_activity = registration_date
+        for uid, u in users.items():
+            if not u["last_activity"] and u["registration_date"]:
+                u["last_activity"] = u["registration_date"]
+    
     return users
 
 
@@ -342,3 +378,101 @@ async def rates_set(key: str, value: float):
     except Exception as e:
         logger.error(f"rates_set error for {key}={value}: {e}", exc_info=True)
         raise
+
+
+# --- User balances (защищённое хранение: только сервер меняет) ---
+
+async def balance_get(user_id: str) -> dict:
+    """Получить баланс пользователя. Возвращает { balance_rub, balance_usdt }."""
+    if not _db_enabled:
+        return {"balance_rub": 0.0, "balance_usdt": 0.0}
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT balance_rub, balance_usdt FROM user_balances WHERE user_id = $1",
+            user_id,
+        )
+    if not row:
+        return {"balance_rub": 0.0, "balance_usdt": 0.0}
+    return {
+        "balance_rub": float(row["balance_rub"] or 0),
+        "balance_usdt": float(row["balance_usdt"] or 0),
+    }
+
+
+async def balance_add_rub(user_id: str, amount: float) -> bool:
+    """Зачислить рубли на баланс (только с сервера, например после вебхука оплаты)."""
+    if not _db_enabled or amount <= 0:
+        return False
+    amount = round(amount, 2)
+    async with _pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_balances (user_id, balance_rub, balance_usdt)
+            VALUES ($1, $2, 0)
+            ON CONFLICT (user_id) DO UPDATE SET
+                balance_rub = user_balances.balance_rub + EXCLUDED.balance_rub,
+                updated_at = NOW()
+        """, user_id, amount)
+    logger.info("balance_add_rub: user_id=%s amount=%.2f", user_id, amount)
+    return True
+
+
+async def balance_add_usdt(user_id: str, amount: float) -> bool:
+    """Зачислить USDT на баланс (только с сервера)."""
+    if not _db_enabled or amount <= 0:
+        return False
+    amount = round(amount, 6)
+    async with _pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_balances (user_id, balance_rub, balance_usdt)
+            VALUES ($1, 0, $2)
+            ON CONFLICT (user_id) DO UPDATE SET
+                balance_usdt = user_balances.balance_usdt + EXCLUDED.balance_usdt,
+                updated_at = NOW()
+        """, user_id, amount)
+    logger.info("balance_add_usdt: user_id=%s amount=%.6f", user_id, amount)
+    return True
+
+
+async def balance_deduct_rub(user_id: str, amount: float) -> Optional[dict]:
+    """
+    Списать рубли с баланса атомарно. Возвращает новый баланс { balance_rub, balance_usdt } или None при недостатке средств.
+    """
+    if not _db_enabled or amount <= 0:
+        return None
+    amount = round(amount, 2)
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE user_balances
+            SET balance_rub = balance_rub - $2, updated_at = NOW()
+            WHERE user_id = $1 AND balance_rub >= $2
+            RETURNING balance_rub, balance_usdt
+        """, user_id, amount)
+        if not row:
+            # Недостаточно средств или записи нет — проверяем текущий баланс
+            row = await conn.fetchrow(
+                "SELECT balance_rub, balance_usdt FROM user_balances WHERE user_id = $1",
+                user_id,
+            )
+            return None
+    logger.info("balance_deduct_rub: user_id=%s amount=%.2f new_rub=%.2f", user_id, amount, float(row["balance_rub"]))
+    return {"balance_rub": float(row["balance_rub"]), "balance_usdt": float(row["balance_usdt"] or 0)}
+
+
+async def balance_deduct_usdt(user_id: str, amount: float) -> Optional[dict]:
+    """
+    Списать USDT с баланса атомарно. Возвращает новый баланс или None при недостатке средств.
+    """
+    if not _db_enabled or amount <= 0:
+        return None
+    amount = round(amount, 6)
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE user_balances
+            SET balance_usdt = balance_usdt - $2, updated_at = NOW()
+            WHERE user_id = $1 AND balance_usdt >= $2
+            RETURNING balance_rub, balance_usdt
+        """, user_id, amount)
+        if not row:
+            return None
+    logger.info("balance_deduct_usdt: user_id=%s amount=%.6f new_usdt=%.6f", user_id, amount, float(row["balance_usdt"]))
+    return {"balance_rub": float(row["balance_rub"] or 0), "balance_usdt": float(row["balance_usdt"])}

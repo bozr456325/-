@@ -164,6 +164,54 @@ def _validate_user_id(user_id: str) -> bool:
     return s.isdigit()
 
 
+def _validate_telegram_init_data(init_data: str, max_age_sec: int = 86400) -> Optional[str]:
+    """
+    Проверка подписи Telegram WebApp initData. Возвращает user_id при успехе, иначе None.
+    Защита от подделки: только запросы с валидной подписью от Telegram принимаются.
+    """
+    if not init_data or not BOT_TOKEN:
+        return None
+    init_data = str(init_data).strip()
+    if not init_data:
+        return None
+    try:
+        from urllib.parse import parse_qsl
+        params = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return None
+    hash_received = (params.get("hash") or "").strip()
+    if not hash_received:
+        return None
+    data_check_parts = sorted((k, v) for k, v in params.items() if k != "hash")
+    data_check_string = "\n".join(f"{k}={v}" for k, v in data_check_parts)
+    secret_key = hmac.new(
+        b"WebAppData",
+        BOT_TOKEN.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    hash_computed = hmac.new(
+        secret_key,
+        data_check_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(hash_computed, hash_received):
+        return None
+    auth_date_str = params.get("auth_date") or ""
+    try:
+        auth_date = int(auth_date_str)
+        if time.time() - auth_date > max_age_sec:
+            return None
+    except (TypeError, ValueError):
+        return None
+    user_json = params.get("user") or "{}"
+    try:
+        user_obj = json.loads(user_json)
+        user_id = str(user_obj.get("id") or "").strip()
+        return user_id if _validate_user_id(user_id) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _validate_login(login: str, field_name: str = "login") -> tuple[str, Optional[str]]:
     """Валидация логина/username: только буквы, цифры, подчёркивание. Возвращает (очищенный, ошибка)."""
     if not login or not isinstance(login, str):
@@ -4453,6 +4501,7 @@ def setup_http_server():
         description: str
         payload_data: str
         use_usdt = False  # пока создаём инвойсы только в RUB, USDT-логику можно добавить отдельно
+        deposit_amount_rub = None
 
         # ----------- Покупка (звёзды / премиум / Steam) -----------
         # ВАЖНО: клиент НЕ задаёт цену и payload. Только type + минимальные данные.
@@ -4608,11 +4657,12 @@ def setup_http_server():
                     {"error": "bad_request", "message": "Максимальная сумма 1,000,000 ₽"}, status=400
                 )
             description = f"Пополнение баланса JET Store на {amount:.0f} ₽"
+            deposit_amount_rub = round(amount, 2)
             payload_data = json.dumps(
                 {
                     "context": "deposit",
                     "user_id": user_id,
-                    "amount_rub": amount,
+                    "amount_rub": deposit_amount_rub,
                     "timestamp": time.time(),
                 },
                 ensure_ascii=False,
@@ -4701,7 +4751,12 @@ def setup_http_server():
                     # Сохраняем метаданные инвойса на стороне сервера,
                     # чтобы не доверять данным из клиента при последующей проверке оплаты.
                     try:
-                        amt_rub = 100.0 if (context == "purchase" and (purchase or {}).get("type") == "spin") else float(amount)
+                        if context == "deposit" and deposit_amount_rub is not None:
+                            amt_rub = deposit_amount_rub
+                        elif context == "purchase" and (purchase or {}).get("type") == "spin":
+                            amt_rub = 100.0
+                        else:
+                            amt_rub = float(amount)
                         order_meta = {
                                 "context": context,
                                 "user_id": user_id,
@@ -5092,6 +5147,25 @@ def setup_http_server():
                         user_id,
                         amount_rub,
                     )
+            elif context == "deposit":
+                import db as _db_dep
+                if _db_dep.is_enabled() and amount_rub > 0:
+                    await _db_dep.balance_add_rub(user_id, amount_rub)
+                    await _db_dep.user_upsert(
+                        user_id,
+                        (order_meta.get("purchase") or {}).get("username") or "",
+                        (order_meta.get("purchase") or {}).get("first_name") or "",
+                    )
+                    await _db_dep.purchase_add(
+                        user_id, amount_rub, 0, "balance",
+                        f"Пополнение баланса на {amount_rub:.0f} ₽",
+                        None,
+                    )
+                order_meta["delivered"] = True
+                if isinstance(orders, dict):
+                    orders[str(invoice_id)] = order_meta
+                _save_cryptobot_order_to_file(str(invoice_id), order_meta)
+                logger.info("CryptoBot webhook: balance deposit delivered, invoice_id=%s, user_id=%s, amount_rub=%s", invoice_id, user_id, amount_rub)
             
             return _json_response({"ok": True, "message": "processed"})
             
@@ -5900,6 +5974,19 @@ def setup_http_server():
                 except Exception:
                     pass
                 _save_freekassa_order_to_file(str(merchant_order_id), order_meta)
+                import db as _db_bal
+                if _db_bal.is_enabled() and amount_rub > 0:
+                    await _db_bal.balance_add_rub(user_id, amount_rub)
+                    await _db_bal.user_upsert(
+                        user_id,
+                        purchase.get("username") or "",
+                        purchase.get("first_name") or "",
+                    )
+                    await _db_bal.purchase_add(
+                        user_id, amount_rub, 0, "balance",
+                        f"Пополнение баланса на {amount_rub:.0f} ₽",
+                        purchase.get("order_id"),
+                    )
                 logger.info("FreeKassa notify: balance deposit delivered, MERCHANT_ORDER_ID=%s, amount_rub=%s", merchant_order_id, amount_rub)
             elif ptype == "steam":
                 account = (purchase.get("login") or "").strip()
@@ -6117,6 +6204,66 @@ def setup_http_server():
     app.router.add_route("OPTIONS", "/api/rating/leaderboard", _rating_cors)
     app.router.add_post("/api/rating/anonymity", rating_anonymity_handler)
     app.router.add_route("OPTIONS", "/api/rating/anonymity", _rating_cors)
+    
+    # API баланса (источник правды — БД; доступ только с валидным Telegram init_data)
+    SPIN_PRICE_RUB = 100.0
+    SPIN_PRICE_USDT = 1.5
+    
+    async def api_balance_get_handler(request):
+        """GET /api/balance — вернуть баланс пользователя. Заголовок X-Telegram-Init-Data обязателен."""
+        init_data = (request.headers.get("X-Telegram-Init-Data") or request.query.get("init_data") or "").strip()
+        user_id = _validate_telegram_init_data(init_data)
+        if not user_id:
+            return _json_response({"error": "unauthorized", "message": "Некорректные или устаревшие данные Telegram"}, status=401)
+        import db as _db_bal
+        if not _db_bal.is_enabled():
+            return _json_response({"balance_rub": 0.0, "balance_usdt": 0.0})
+        bal = await _db_bal.balance_get(user_id)
+        return _json_response({"balance_rub": bal["balance_rub"], "balance_usdt": bal["balance_usdt"]})
+    
+    async def api_balance_deduct_handler(request):
+        """POST /api/balance/deduct — списать с баланса (только тип spin). Тело: { type: 'spin', currency: 'RUB'|'USDT' }. Init_data в заголовке или в теле."""
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            body = {}
+        init_data = (request.headers.get("X-Telegram-Init-Data") or body.get("init_data") or "").strip()
+        user_id = _validate_telegram_init_data(init_data)
+        if not user_id:
+            return _json_response({"error": "unauthorized", "message": "Некорректные или устаревшие данные Telegram"}, status=401)
+        deduct_type = (body.get("type") or "").strip().lower()
+        currency = (body.get("currency") or "RUB").strip().upper()
+        if deduct_type != "spin":
+            return _json_response({"error": "bad_request", "message": "Допустим только type: spin"}, status=400)
+        if currency not in ("RUB", "USDT"):
+            return _json_response({"error": "bad_request", "message": "Допустимы currency: RUB или USDT"}, status=400)
+        import db as _db_bal
+        if not _db_bal.is_enabled():
+            return _json_response({"error": "service_unavailable", "message": "Баланс временно недоступен"}, status=503)
+        amount_rub = SPIN_PRICE_RUB if currency == "RUB" else 0.0
+        amount_usdt = SPIN_PRICE_USDT if currency == "USDT" else 0.0
+        if currency == "RUB":
+            new_bal = await _db_bal.balance_deduct_rub(user_id, amount_rub)
+        else:
+            new_bal = await _db_bal.balance_deduct_usdt(user_id, amount_usdt)
+        if new_bal is None:
+            return _json_response(
+                {"error": "insufficient_funds", "message": "Недостаточно средств на балансе"},
+                status=400,
+            )
+        return _json_response({
+            "success": True,
+            "balance_rub": new_bal["balance_rub"],
+            "balance_usdt": new_bal["balance_usdt"],
+            "spins_added": 1,
+        })
+    
+    def _balance_cors(r):
+        return Response(status=204, headers=_cors_headers())
+    app.router.add_get("/api/balance", api_balance_get_handler)
+    app.router.add_route("OPTIONS", "/api/balance", _balance_cors)
+    app.router.add_post("/api/balance/deduct", api_balance_deduct_handler)
+    app.router.add_route("OPTIONS", "/api/balance/deduct", _balance_cors)
     
     # API записи покупки: рейтинг + рефералы + users_data.json
     # (функция _get_users_data_path уже определена выше)
