@@ -5803,26 +5803,8 @@ def setup_http_server():
     async def freekassa_notify_handler(request):
         """
         URL оповещения FreeKassa.
-        Проверяем IP и SIGN, после чего выдаём товар и отвечаем 'YES'.
+        Проверяем подпись SIGN, после чего выдаём товар и отвечаем 'YES'. IP не проверяем.
         """
-        # Проверка IP сервера FreeKassa (добавить свои через FREEKASSA_ALLOWED_IPS: через запятую)
-        allowed_ips = {
-            "168.119.157.136",
-            "168.119.60.227",
-            "178.154.197.79",
-            "51.250.54.238",
-        }
-        extra_ips = (os.getenv("FREEKASSA_ALLOWED_IPS") or "").strip()
-        if extra_ips:
-            for x in extra_ips.replace(" ", "").split(","):
-                if x:
-                    allowed_ips.add(x.strip())
-        skip_ip = (os.getenv("FREEKASSA_SKIP_IP_CHECK") or "").strip().lower() in ("1", "true", "yes")
-        ip = _get_client_ip(request)
-        if not skip_ip and ip not in allowed_ips:
-            logger.warning("FreeKassa notify: IP %s not in allowed list (add via FREEKASSA_ALLOWED_IPS or FREEKASSA_SKIP_IP_CHECK=1)", ip)
-            return web.Response(status=403, text="hacking attempt!")
-
         if request.method == "POST":
             try:
                 content_type = (request.headers.get("Content-Type") or "").lower()
