@@ -6240,12 +6240,61 @@ def setup_http_server():
             "spins_added": 1,
         })
     
+    # Допустимые суммы выигрыша рулетки (для проверки)
+    SPIN_PRIZES_RUB = [5, 10, 25, 50, 75, 100, 150, 200, 300, 500]
+    SPIN_PRIZES_USDT = [0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25]
+    
+    async def api_balance_credit_handler(request):
+        """POST /api/balance/credit — зачислить выигрыш рулетки. Тело: { reason: 'spin_win', currency: 'RUB'|'USDT', amount: number }."""
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            body = {}
+        init_data = (request.headers.get("X-Telegram-Init-Data") or body.get("init_data") or "").strip()
+        user_id = _validate_telegram_init_data(init_data)
+        if not user_id:
+            return _json_response({"error": "unauthorized", "message": "Некорректные или устаревшие данные Telegram"}, status=401)
+        reason = (body.get("reason") or "").strip().lower()
+        if reason != "spin_win":
+            return _json_response({"error": "bad_request", "message": "Допустим только reason: spin_win"}, status=400)
+        currency = (body.get("currency") or "RUB").strip().upper()
+        if currency not in ("RUB", "USDT"):
+            return _json_response({"error": "bad_request", "message": "Допустимы currency: RUB или USDT"}, status=400)
+        try:
+            amount = float(body.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if currency == "RUB":
+            if amount not in SPIN_PRIZES_RUB:
+                return _json_response({"error": "bad_request", "message": "Недопустимая сумма выигрыша (рубли)"}, status=400)
+            amount = round(amount, 2)
+        else:
+            if not any(abs(amount - p) < 1e-6 for p in SPIN_PRIZES_USDT):
+                return _json_response({"error": "bad_request", "message": "Недопустимая сумма выигрыша (USDT)"}, status=400)
+            amount = round(amount, 6)
+        import db as _db_bal
+        if not _db_bal.is_enabled():
+            return _json_response({"error": "service_unavailable", "message": "Баланс временно недоступен"}, status=503)
+        if currency == "RUB":
+            await _db_bal.balance_add_rub(user_id, amount)
+        else:
+            await _db_bal.balance_add_usdt(user_id, amount)
+        new_bal = await _db_bal.balance_get(user_id)
+        return _json_response({
+            "success": True,
+            "balance_rub": new_bal["balance_rub"],
+            "balance_usdt": new_bal["balance_usdt"],
+            "credited": amount,
+        })
+    
     def _balance_cors(r):
         return Response(status=204, headers=_cors_headers())
     app.router.add_get("/api/balance", api_balance_get_handler)
     app.router.add_route("OPTIONS", "/api/balance", _balance_cors)
     app.router.add_post("/api/balance/deduct", api_balance_deduct_handler)
     app.router.add_route("OPTIONS", "/api/balance/deduct", _balance_cors)
+    app.router.add_post("/api/balance/credit", api_balance_credit_handler)
+    app.router.add_route("OPTIONS", "/api/balance/credit", _balance_cors)
     
     # API записи покупки: рейтинг + рефералы + users_data.json
     # (функция _get_users_data_path уже определена выше)
