@@ -6204,7 +6204,9 @@ def setup_http_server():
         return _json_response({"balance_rub": bal["balance_rub"], "balance_usdt": bal["balance_usdt"]})
     
     async def api_balance_deduct_handler(request):
-        """POST /api/balance/deduct — списать с баланса (только тип spin). Тело: { type: 'spin', currency: 'RUB'|'USDT' }. Init_data в заголовке или в теле."""
+        """POST /api/balance/deduct — списать с баланса (только тип spin).
+        Тело: { type: 'spin', currency: 'RUB'|'USDT', amount?: number }.
+        Если amount не передан — списывается фиксированная цена спина SPIN_PRICE_RUB/SPIN_PRICE_USDT (старое поведение)."""
         try:
             body = await request.json() if request.can_read_body else {}
         except Exception:
@@ -6222,8 +6224,20 @@ def setup_http_server():
         import db as _db_bal
         if not _db_bal.is_enabled():
             return _json_response({"error": "service_unavailable", "message": "Баланс временно недоступен"}, status=503)
+
+        # Поддержка как старого формата (фиксированная цена спина),
+        # так и нового (динамическая ставка amount от клиента).
         amount_rub = SPIN_PRICE_RUB if currency == "RUB" else 0.0
         amount_usdt = SPIN_PRICE_USDT if currency == "USDT" else 0.0
+        if currency == "RUB":
+            try:
+                client_amount = float(body.get("amount") or 0)
+            except (TypeError, ValueError):
+                client_amount = 0.0
+            # Если клиент передал положительную ставку — списываем именно её
+            # (например, новая круговая рулетка с выбором ставки).
+            if client_amount > 0:
+                amount_rub = round(client_amount, 2)
         if currency == "RUB":
             new_bal = await _db_bal.balance_deduct_rub(user_id, amount_rub)
         else:
