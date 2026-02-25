@@ -6190,6 +6190,9 @@ def setup_http_server():
     # API баланса (источник правды — БД; доступ только с валидным Telegram init_data)
     SPIN_PRICE_RUB = 100.0
     SPIN_PRICE_USDT = 1.5
+    # Лимиты ставок новой рулетки (должны совпадать с MIN_BET_RUB / MAX_BET_RUB на фронте)
+    MIN_BET_RUB = 50.0
+    MAX_BET_RUB = 10000.0
     
     async def api_balance_get_handler(request):
         """GET /api/balance — вернуть баланс пользователя. Заголовок X-Telegram-Init-Data обязателен."""
