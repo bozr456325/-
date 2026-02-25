@@ -6254,9 +6254,29 @@ def setup_http_server():
             "spins_added": 1,
         })
     
-    # Допустимые суммы выигрыша рулетки (для проверки)
+    # Допустимые суммы выигрыша рулетки (для проверки старой рулетки)
     SPIN_PRIZES_RUB = [5, 10, 25, 50, 75, 100, 150, 200, 300, 500]
     SPIN_PRIZES_USDT = [0.02, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25]
+
+    # Новая круговая рулетка: конфигурация множителей (как на фронтенде)
+    ROULETTE_SEGMENTS = [
+        {"multiplier": 0.2, "weight": 22},   # gray
+        {"multiplier": 0.7, "weight": 10},   # yellow
+        {"multiplier": 2.4, "weight": 6},    # red
+        {"multiplier": 10.0, "weight": 2},   # green
+    ]
+
+    def _roulette_pick_multiplier() -> float:
+        total = sum(seg["weight"] for seg in ROULETTE_SEGMENTS)
+        if total <= 0:
+            return 0.2
+        import random
+        r = random.randint(0, total - 1)
+        for seg in ROULETTE_SEGMENTS:
+            if r < seg["weight"]:
+                return float(seg["multiplier"])
+            r -= seg["weight"]
+        return 0.2
     
     async def api_balance_credit_handler(request):
         """POST /api/balance/credit — зачислить выигрыш рулетки. Тело: { reason: 'spin_win', currency: 'RUB'|'USDT', amount: number }."""
@@ -6301,14 +6321,106 @@ def setup_http_server():
             "credited": amount,
         })
     
+    # Безопасный спин рулетки: сервер сам списывает ставку и начисляет выигрыш
+    async def api_roulette_spin_handler(request):
+        """
+        POST /api/roulette/spin
+        Тело: { amount: number, currency: 'RUB' }.
+        Сервер:
+          - проверяет init_data (Telegram WebApp)
+          - проверяет баланс
+          - случайно выбирает множитель из ROULETTE_SEGMENTS
+          - списывает ставку, начисляет выигрыш
+          - возвращает { success, balance_rub, multiplier, win_amount }.
+        """
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            body = {}
+        init_data = (request.headers.get("X-Telegram-Init-Data") or body.get("init_data") or "").strip()
+        user_id = _validate_telegram_init_data(init_data)
+        if not user_id:
+            return _json_response(
+                {"success": False, "error": "unauthorized", "message": "Некорректные или устаревшие данные Telegram"},
+                status=401,
+            )
+        try:
+            amount = float(body.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        currency = (body.get("currency") or "RUB").strip().upper()
+        if currency != "RUB":
+            return _json_response(
+                {"success": False, "error": "bad_request", "message": "Поддерживается только RUB"},
+                status=400,
+            )
+        # Минимальная и максимальная ставка — как в фронтенде
+        if amount < MIN_BET_RUB:
+            return _json_response(
+                {"success": False, "error": "bad_amount", "message": f"Минимальная ставка {MIN_BET_RUB} ₽"},
+                status=400,
+            )
+        if amount > MAX_BET_RUB:
+            return _json_response(
+                {"success": False, "error": "bad_amount", "message": f"Максимальная ставка {MAX_BET_RUB} ₽"},
+                status=400,
+            )
+        amount = round(amount, 2)
+
+        import db as _db_ruo
+        if not _db_ruo.is_enabled():
+            return _json_response(
+                {"success": False, "error": "service_unavailable", "message": "Баланс временно недоступен"},
+                status=503,
+            )
+
+        # Проверяем баланс
+        bal = await _db_ruo.balance_get(user_id)
+        if (bal.get("balance_rub") or 0) < amount:
+            return _json_response(
+                {"success": False, "error": "insufficient_funds", "message": "Недостаточно средств на балансе"},
+                status=400,
+            )
+
+        # Выбираем множитель и считаем выигрыш
+        multiplier = _roulette_pick_multiplier()
+        win_amount = int(round(amount * multiplier))
+
+        # Атомарно списываем ставку и начисляем выигрыш (2 шага, но обе операции только на сервере)
+        new_bal = await _db_ruo.balance_deduct_rub(user_id, amount)
+        if new_bal is None:
+            return _json_response(
+                {"success": False, "error": "insufficient_funds", "message": "Недостаточно средств на балансе"},
+                status=400,
+            )
+        if win_amount > 0:
+            await _db_ruo.balance_add_rub(user_id, win_amount)
+        final_bal = await _db_ruo.balance_get(user_id)
+
+        # При желании здесь можно дописать запись транзакции в отдельную таблицу.
+        return _json_response({
+            "success": True,
+            "balance_rub": final_bal["balance_rub"],
+            "multiplier": multiplier,
+            "win_amount": win_amount,
+        })
+
     def _balance_cors(r):
         return Response(status=204, headers=_cors_headers())
+
+    def _roulette_cors(r):
+        return Response(status=204, headers=_cors_headers())
+
     app.router.add_get("/api/balance", api_balance_get_handler)
     app.router.add_route("OPTIONS", "/api/balance", _balance_cors)
     app.router.add_post("/api/balance/deduct", api_balance_deduct_handler)
     app.router.add_route("OPTIONS", "/api/balance/deduct", _balance_cors)
     app.router.add_post("/api/balance/credit", api_balance_credit_handler)
     app.router.add_route("OPTIONS", "/api/balance/credit", _balance_cors)
+
+    # Новая рулетка
+    app.router.add_post("/api/roulette/spin", api_roulette_spin_handler)
+    app.router.add_route("OPTIONS", "/api/roulette/spin", _roulette_cors)
     
     # API записи покупки: рейтинг + рефералы + users_data.json
     # (функция _get_users_data_path уже определена выше)
