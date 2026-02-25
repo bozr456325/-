@@ -2497,6 +2497,69 @@ def setup_http_server():
     app.router.add_get("/api/admin/stats", admin_stats_handler)
     app.router.add_route("OPTIONS", "/api/admin/stats", lambda r: Response(status=204, headers=_cors_headers()))
 
+    async def admin_balance_adjust_handler(request):
+        """
+        POST /api/admin/balance-adjust
+        Заголовок: Authorization: Bearer <ADMIN_PASSWORD>
+        JSON: { "username": "name", "user_id": "123", "amount": 100 }  # amount может быть отрицательной
+        """
+        auth = request.headers.get("Authorization") or ""
+        token = (auth.replace("Bearer ", "").replace("bearer ", "").strip() if auth else "") or request.headers.get("X-Admin-Password") or ""
+        if not ADMIN_PASSWORD or token != ADMIN_PASSWORD:
+            return _json_response({"success": False, "error": "unauthorized"}, status=401)
+
+        try:
+            body = await request.json() if request.can_read_body else {}
+        except Exception:
+            body = {}
+
+        username = (body.get("username") or "").strip().lstrip("@")
+        user_id = str(body.get("user_id") or "").strip()
+        try:
+            amount = float(body.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+
+        if not amount:
+            return _json_response({"success": False, "error": "bad_amount", "message": "Сумма должна быть ненулевой"}, status=400)
+
+        import db as _db_admin
+        if not _db_admin.is_enabled():
+            return _json_response({"success": False, "error": "service_unavailable", "message": "База данных недоступна"}, status=503)
+
+        # Определяем user_id по username, если он не передан явно
+        if not user_id:
+            if not username:
+                return _json_response({"success": False, "error": "bad_request", "message": "Нужен username или user_id"}, status=400)
+            user_id = await _db_admin.user_find_by_username(username)
+            if not user_id:
+                return _json_response({"success": False, "error": "not_found", "message": "Пользователь не найден"}, status=404)
+
+        # Корректируем баланс
+        new_balance = None
+        if amount > 0:
+            ok = await _db_admin.balance_add_rub(user_id, amount)
+            if not ok:
+                return _json_response({"success": False, "error": "db_error", "message": "Не удалось пополнить баланс"}, status=500)
+            bal = await _db_admin.balance_get(user_id)
+            new_balance = bal.get("balance_rub", 0.0)
+        else:
+            res = await _db_admin.balance_deduct_rub(user_id, -amount)
+            if res is None:
+                return _json_response({"success": False, "error": "insufficient_funds", "message": "Недостаточно средств для списания"}, status=400)
+            new_balance = res.get("balance_rub", 0.0)
+
+        return _json_response({
+            "success": True,
+            "user_id": user_id,
+            "username": username,
+            "delta": amount,
+            "balance_rub": new_balance,
+        })
+
+    app.router.add_post("/api/admin/balance-adjust", admin_balance_adjust_handler)
+    app.router.add_route("OPTIONS", "/api/admin/balance-adjust", lambda r: Response(status=204, headers=_cors_headers()))
+
     # Отдаём robots.txt, чтобы боты (например, Яндекс) не вызывали 404 и не засоряли логи
     async def robots_handler(request):
         """

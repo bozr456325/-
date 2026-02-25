@@ -289,10 +289,12 @@ async def get_users_with_purchases() -> dict:
                 "purchases": []
             }
         
-        # Затем получаем покупки
+        # Затем получаем покупки. В рейтинг идут ТОЛЬКО покупки звёзд (type = 'stars'),
+        # пополнения баланса и прочие типы здесь игнорируются.
         purchase_rows = await conn.fetch("""
             SELECT user_id, amount_rub, stars_amount, type, product_name, created_at
             FROM purchases
+            WHERE LOWER(type) = 'stars'
             ORDER BY created_at DESC
         """)
         
@@ -397,6 +399,26 @@ async def balance_get(user_id: str) -> dict:
         "balance_rub": float(row["balance_rub"] or 0),
         "balance_usdt": float(row["balance_usdt"] or 0),
     }
+
+
+async def user_find_by_username(username: str) -> Optional[str]:
+    """
+    Найти user_id по Telegram username (без @). Возвращает ID или None.
+    Используется в админке для ручной правки баланса.
+    """
+    if not _db_enabled:
+        return None
+    if not username:
+        return None
+    uname = username.strip().lstrip("@")
+    if not uname:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM users WHERE LOWER(username) = LOWER($1) LIMIT 1",
+            uname.lower(),
+        )
+    return row["id"] if row and row.get("id") else None
 
 
 async def balance_add_rub(user_id: str, amount: float) -> bool:
